@@ -22,6 +22,10 @@ body,
   height: 100vh;
 }
 
+#game.locked {
+  cursor: none;
+}
+
 button {
   border: 1px solid rgba(255, 255, 255, 0.18);
   border-radius: 6px;
@@ -206,8 +210,12 @@ h2 {
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 8px;
   cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   min-height: 106px;
   padding: 10px;
+  position: relative;
 }
 
 .slot.active {
@@ -223,7 +231,7 @@ h2 {
 .slot b {
   display: block;
   font-size: 18px;
-  margin-bottom: 8px;
+  margin-bottom: 0;
 }
 
 .slot span,
@@ -232,6 +240,54 @@ h2 {
   display: block;
   font-size: 13px;
   line-height: 1.35;
+}
+
+.slot span {
+  flex: 1;
+}
+
+.slot-badge {
+  align-self: flex-start;
+  background: rgba(127, 231, 255, 0.12);
+  border: 1px solid rgba(127, 231, 255, 0.24);
+  border-radius: 999px;
+  color: #bff4ff;
+  font-size: 11px;
+  font-weight: 900;
+  line-height: 1;
+  padding: 5px 7px;
+  text-transform: uppercase;
+}
+
+.slot.active .slot-badge {
+  background: rgba(247, 201, 72, 0.16);
+  border-color: rgba(247, 201, 72, 0.42);
+  color: #ffe58a;
+}
+
+.slot.locked .slot-badge {
+  background: rgba(143, 164, 175, 0.12);
+  border-color: rgba(143, 164, 175, 0.2);
+  color: #b5c4cc;
+}
+
+.menu-actions {
+  align-items: center;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: auto 1fr;
+  margin: 0 0 10px;
+}
+
+.selected-summary {
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 6px;
+  color: #d6e3ea;
+  font-size: 13px;
+  font-weight: 800;
+  min-height: 44px;
+  padding: 10px 12px;
 }
 
 .meta-strip,
@@ -383,6 +439,10 @@ h2 {
   .menu-grid,
   .choices,
   .unlock-list {
+    grid-template-columns: 1fr;
+  }
+
+  .menu-actions {
     grid-template-columns: 1fr;
   }
 

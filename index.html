@@ -44,13 +44,16 @@
             <span>Storm scout. Starts with Static Lasso. Unlock: score 5000 in one run.</span>
           </div>
         </div>
+        <div class="menu-actions">
+          <button id="start-btn" class="primary">Start Run</button>
+          <div class="selected-summary" id="selected-summary">Lume - Pulse Bolt</div>
+        </div>
         <div class="meta-strip" id="menu-stats">Runs 0 - Wins 0 - Best 00:00 - Best Kills 0</div>
         <div class="unlock-panel">
           <div class="unlock-title">Quests & Unlocks</div>
           <div id="unlock-list"></div>
         </div>
-        <button id="start-btn" class="primary">Start Run</button>
-        <div class="controls">WASD move - Space jump - Shift dash - E interact - arrows rotate camera - right-drag camera - wheel zoom - C reset view - 1-3 choose upgrades - P pause - F fullscreen</div>
+        <div class="controls">WASD move - Ctrl/Q crouch or slide - Space jump - Shift dash - E interact - mouse/arrow camera - wheel zoom - C reset view - 1-3 choose upgrades - P pause - ESC unlock cursor - F fullscreen</div>
       </div>
       <div class="panel chooser hidden" id="chooser">
         <div class="chooser-title">Choose an upgrade</div>
@@ -60,6 +63,7 @@
         <h2>Paused</h2>
         <button id="resume-btn" class="primary">Resume</button>
         <button id="restart-btn">Restart Run</button>
+        <button id="menu-btn">Exit to Menu</button>
       </div>
       <div class="panel result hidden" id="result">
         <h2 id="result-title">Run Complete</h2>

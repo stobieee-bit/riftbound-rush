@@ -34,6 +34,7 @@ const dom = {
   start: document.querySelector("#start-btn"),
   resume: document.querySelector("#resume-btn"),
   restart: document.querySelector("#restart-btn"),
+  exitMenu: document.querySelector("#menu-btn"),
   again: document.querySelector("#again-btn"),
   slots: [...document.querySelectorAll(".slot")],
   hpBar: document.querySelector("#hp-bar"),
@@ -44,6 +45,7 @@ const dom = {
   coins: document.querySelector("#coins"),
   objective: document.querySelector("#objective"),
   menuStats: document.querySelector("#menu-stats"),
+  selectedSummary: document.querySelector("#selected-summary"),
   unlockList: document.querySelector("#unlock-list"),
   buildList: document.querySelector("#build-list"),
   toast: document.querySelector("#toast"),
@@ -77,6 +79,28 @@ const DEFAULT_CAMERA = {
 const ARENA_RADIUS = 104;
 const TILE_SIZE = 8;
 const META_KEY = "riftbound-rush-meta-v1";
+const SHRINE_CHARGE_SECONDS = 5;
+const CROUCH_KEYS = ["ControlLeft", "ControlRight", "KeyQ"];
+const GAME_INPUT_CODES = new Set([
+  "KeyW",
+  "KeyA",
+  "KeyS",
+  "KeyD",
+  "KeyQ",
+  "KeyE",
+  "KeyC",
+  "KeyP",
+  "KeyF",
+  "Space",
+  "ShiftLeft",
+  "ShiftRight",
+  "ControlLeft",
+  "ControlRight",
+  "ArrowLeft",
+  "ArrowRight",
+  "ArrowUp",
+  "ArrowDown",
+]);
 
 const rarityOrder = ["common", "rare", "epic", "legendary"];
 const rarityPower = {
@@ -321,6 +345,14 @@ const upgrades = [
     description: "Improves rare upgrade odds and chip drops.",
   },
   {
+    id: "attune",
+    name: "Ritual Winder",
+    type: "relic",
+    max: 5,
+    tags: ["utility"],
+    description: "Charges shrines faster.",
+  },
+  {
     id: "shield",
     name: "Quiet Shell",
     type: "relic",
@@ -440,6 +472,10 @@ const state = {
   lastObjective: "",
 };
 
+if (state.meta.lastCharacter && characters[state.meta.lastCharacter]) {
+  selectedCharacter = state.meta.lastCharacter;
+}
+
 setupScene();
 setupUi();
 resize();
@@ -491,28 +527,36 @@ function setupUi() {
       const id = slot.dataset.character;
       if (slot.classList.contains("locked")) return;
       selectedCharacter = id;
+      state.meta.lastCharacter = id;
+      saveMeta();
       dom.slots.forEach((candidate) => candidate.classList.remove("active"));
       slot.classList.add("active");
+      syncMenuLocks();
     });
   });
 
   dom.start.addEventListener("click", () => startRun());
   dom.resume.addEventListener("click", () => togglePause(false));
   dom.restart.addEventListener("click", () => startRun());
+  dom.exitMenu.addEventListener("click", () => returnToMenu());
   dom.again.addEventListener("click", () => {
-    dom.result.classList.add("hidden");
-    dom.menu.classList.remove("hidden");
-    dom.hud.classList.add("hidden");
-    state.mode = "menu";
-    syncMenuLocks();
-    updateMenuMeta();
+    returnToMenu();
   });
 
   window.addEventListener("keydown", (event) => {
+    if (GAME_INPUT_CODES.has(event.code) && ["playing", "paused", "upgrade"].includes(state.mode)) {
+      event.preventDefault();
+    }
     if (event.repeat) return;
     keys.add(event.code);
     justPressed.add(event.code);
 
+    if (event.code === "Enter" && state.mode === "menu") {
+      startRun();
+    }
+    if (event.code === "Escape") {
+      releaseGamePointerLock();
+    }
     if (event.code === "KeyF") {
       toggleFullscreen();
     }
@@ -538,6 +582,9 @@ function setupUi() {
   });
 
   canvas.addEventListener("contextmenu", (event) => event.preventDefault());
+  canvas.addEventListener("click", () => {
+    if (state.mode === "playing") requestGamePointerLock();
+  });
   canvas.addEventListener("pointerdown", (event) => {
     if (event.button !== 2) return;
     pointer.rotating = true;
@@ -546,6 +593,10 @@ function setupUi() {
     canvas.setPointerCapture?.(event.pointerId);
   });
   canvas.addEventListener("pointermove", (event) => {
+    if (document.pointerLockElement === canvas && state.mode === "playing") {
+      orbitCamera(event.movementX * -0.0036, event.movementY * 0.0028);
+      return;
+    }
     if (!pointer.rotating) return;
     const dx = event.clientX - pointer.lastX;
     const dy = event.clientY - pointer.lastY;
@@ -555,6 +606,11 @@ function setupUi() {
   });
   window.addEventListener("pointerup", () => {
     pointer.rotating = false;
+  });
+  document.addEventListener("pointerlockchange", () => {
+    const locked = document.pointerLockElement === canvas;
+    pointer.rotating = false;
+    canvas.classList.toggle("locked", locked);
   });
   canvas.addEventListener(
     "wheel",
@@ -635,6 +691,13 @@ function startRun() {
     dashTimer: 0,
     dashInvuln: 0,
     dashReady: 0,
+    crouching: false,
+    crouchAmount: 0,
+    sliding: false,
+    slideTimer: 0,
+    slideCooldown: 0,
+    slideDirX: 0,
+    slideDirZ: 0,
     invuln: 0,
     maxJumps: 1,
     jumpsLeft: 1,
@@ -643,6 +706,7 @@ function startRun() {
     shieldMax: 0,
     shieldTimer: 0,
     thorns: 0,
+    shrineSpeed: 1,
     level: 1,
     xp: 0,
     xpNeeded: 28,
@@ -664,6 +728,7 @@ function startRun() {
   dom.chooser.classList.add("hidden");
   showToast(`${def.name} enters the rift.`);
   updateHud(true);
+  requestGamePointerLock();
 }
 
 function clearWorld() {
@@ -849,11 +914,30 @@ function createShrine(x, z, index) {
   group.position.set(x, y, z);
   group.rotation.y = index * 1.1;
   state.groups.props.add(group);
+
+  const progress = new THREE.Group();
+  const progressBack = new THREE.Mesh(
+    new THREE.BoxGeometry(3.8, 0.18, 0.18),
+    new THREE.MeshBasicMaterial({ color: 0x0d1b22 }),
+  );
+  const progressFill = new THREE.Mesh(
+    new THREE.BoxGeometry(1, 0.26, 0.24),
+    new THREE.MeshBasicMaterial({ color: 0x7ff7d4 }),
+  );
+  progressBack.position.y = 0;
+  progressFill.position.set(-1.9, 0, 0.02);
+  progress.add(progressBack, progressFill);
+  progress.position.set(x, y + 4.45, z);
+  progress.visible = false;
+  state.groups.props.add(progress);
+
   state.shrines.push({
     x,
     y,
     z,
     mesh: group,
+    progress,
+    progressFill,
     radius: 5,
     charge: 0,
     charged: false,
@@ -978,6 +1062,7 @@ function updatePlayer(dt) {
   if (keys.has("KeyS")) mz -= 1;
   if (keys.has("KeyA")) mx -= 1;
   if (keys.has("KeyD")) mx += 1;
+  const rawForward = mz;
   const len = Math.hypot(mx, mz);
   if (len > 0) {
     mx /= len;
@@ -994,6 +1079,40 @@ function updatePlayer(dt) {
   player.dashInvuln = Math.max(0, player.dashInvuln - dt);
   player.invuln = Math.max(0, player.invuln - dt);
   player.shieldTimer = Math.max(0, player.shieldTimer - dt);
+  player.slideCooldown = Math.max(0, player.slideCooldown - dt);
+
+  const crouchHeld = CROUCH_KEYS.some((code) => keys.has(code));
+  const crouchPressed = CROUCH_KEYS.some((code) => justPressed.has(code));
+  const horizontalSpeed = Math.hypot(player.vx, player.vz);
+  const canStartSlide =
+    crouchPressed &&
+    player.grounded &&
+    rawForward > 0.55 &&
+    horizontalSpeed > player.speed * 0.74 &&
+    player.slideCooldown <= 0 &&
+    player.dashTimer <= 0;
+
+  if (canStartSlide) {
+    const dirX = horizontalSpeed > 0.1 ? player.vx / horizontalSpeed : moveX;
+    const dirZ = horizontalSpeed > 0.1 ? player.vz / horizontalSpeed : moveZ;
+    player.sliding = true;
+    player.slideTimer = 0.72;
+    player.slideCooldown = 0.32;
+    player.slideDirX = dirX;
+    player.slideDirZ = dirZ;
+    const slideSpeed = Math.max(horizontalSpeed * 1.18, player.speed * 1.62);
+    player.vx = dirX * slideSpeed;
+    player.vz = dirZ * slideSpeed;
+    spawnBurst(player.x, player.y + 0.25, player.z, 0xbff4ff, 5, 1.2);
+  }
+
+  if (!crouchHeld && player.sliding) {
+    player.sliding = false;
+    player.slideTimer = 0;
+  }
+
+  player.crouching = crouchHeld || player.sliding;
+  player.crouchAmount = approach(player.crouchAmount, player.crouching ? 1 : 0, dt * 7.5);
 
   if (player.shieldMax > 0 && player.shieldCharges < player.shieldMax && player.shieldTimer <= 0) {
     player.shieldCharges += 1;
@@ -1001,7 +1120,7 @@ function updatePlayer(dt) {
     showToast("Quiet Shell restored a barrier.");
   }
 
-  if ((keys.has("ShiftLeft") || keys.has("ShiftRight")) && player.dashReady <= 0 && len > 0) {
+  if ((keys.has("ShiftLeft") || keys.has("ShiftRight")) && player.dashReady <= 0 && len > 0 && !player.sliding) {
     player.dashTimer = 0.18;
     player.dashReady = player.dashCooldown;
     player.dashInvuln = 0.32;
@@ -1017,10 +1136,29 @@ function updatePlayer(dt) {
 
   if (player.dashTimer > 0) {
     player.dashTimer -= dt;
+  } else if (player.sliding) {
+    player.slideTimer -= dt;
+    const steer = THREE.MathUtils.clamp(dt * 3.2, 0, 0.18);
+    if (len > 0) {
+      player.slideDirX = THREE.MathUtils.lerp(player.slideDirX, moveX, steer);
+      player.slideDirZ = THREE.MathUtils.lerp(player.slideDirZ, moveZ, steer);
+      const dirLen = Math.max(Math.hypot(player.slideDirX, player.slideDirZ), 0.001);
+      player.slideDirX /= dirLen;
+      player.slideDirZ /= dirLen;
+    }
+    const slideSpeed = Math.hypot(player.vx, player.vz);
+    const targetSlideSpeed = player.speed * (crouchHeld ? 0.82 : 0.52);
+    const nextSlideSpeed = approach(slideSpeed, targetSlideSpeed, 4.6 * dt);
+    player.vx = player.slideDirX * nextSlideSpeed;
+    player.vz = player.slideDirZ * nextSlideSpeed;
+    if (player.slideTimer <= 0 || nextSlideSpeed <= player.speed * 0.88) {
+      player.sliding = false;
+    }
   } else {
     const accel = player.grounded ? 22 : 11;
-    player.vx = approach(player.vx, moveX * player.speed, accel * dt);
-    player.vz = approach(player.vz, moveZ * player.speed, accel * dt);
+    const crouchSpeed = crouchHeld ? 0.58 : 1;
+    player.vx = approach(player.vx, moveX * player.speed * crouchSpeed, accel * dt);
+    player.vz = approach(player.vz, moveZ * player.speed * crouchSpeed, accel * dt);
   }
 
   player.x += player.vx * dt;
@@ -1057,6 +1195,8 @@ function syncPlayerObject() {
   if (!state.player || !state.playerObj) return;
   const player = state.player;
   state.playerObj.position.set(player.x, player.y, player.z);
+  const crouch = player.crouchAmount || 0;
+  state.playerObj.scale.set(1 + crouch * 0.06, 1 - crouch * 0.34, 1 + crouch * 0.06);
   if (Math.hypot(player.vx, player.vz) > 0.2) {
     state.playerObj.rotation.y = Math.atan2(player.vx, player.vz);
   }
@@ -1070,15 +1210,22 @@ function updateWorldObjects(dt) {
   }
 
   for (const shrine of state.shrines) {
-    if (shrine.charged) continue;
+    syncShrineProgress(shrine, false);
+    if (shrine.charged) {
+      shrine.mesh.rotation.y += dt * 0.35;
+      continue;
+    }
     shrine.mesh.rotation.y += dt * 0.8;
     if (distance2d(player, shrine) < shrine.radius) {
-      shrine.charge += dt / 2.8;
+      shrine.charge += (dt * player.shrineSpeed) / SHRINE_CHARGE_SECONDS;
       shrine.mesh.scale.setScalar(1 + shrine.charge * 0.15);
+      syncShrineProgress(shrine, true);
       if (shrine.charge >= 1) {
+        shrine.charge = 1;
         shrine.charged = true;
         state.runStats.shrines += 1;
         shrine.mesh.scale.setScalar(1.25);
+        syncShrineProgress(shrine, true);
         showUpgradeChooser("shrine");
         showToast("Shrine charged.");
         break;
@@ -1086,6 +1233,7 @@ function updateWorldObjects(dt) {
     } else {
       shrine.charge = Math.max(0, shrine.charge - dt * 0.18);
       shrine.mesh.scale.setScalar(1 + shrine.charge * 0.15);
+      syncShrineProgress(shrine, false);
     }
   }
 
@@ -1137,6 +1285,17 @@ function openChest(chest) {
   showToast(`Cache opened for ${chest.cost} chips.`);
   showUpgradeChooser("chest");
   return true;
+}
+
+function syncShrineProgress(shrine, active) {
+  if (!shrine.progress || !shrine.progressFill) return;
+  const charge = THREE.MathUtils.clamp(shrine.charge, 0, 1);
+  shrine.progress.visible = active || charge > 0.01 || shrine.charged;
+  shrine.progress.lookAt(camera.position);
+  const width = Math.max(0.02, 3.72 * charge);
+  shrine.progressFill.scale.x = width;
+  shrine.progressFill.position.x = -1.86 + width / 2;
+  shrine.progressFill.material.color.setHex(shrine.charged ? 0xf7c948 : 0x7ff7d4);
 }
 
 function updateDirector(dt) {
@@ -1813,6 +1972,7 @@ function addXp(amount) {
 
 function showUpgradeChooser(source) {
   if (state.mode !== "playing") return;
+  releaseGamePointerLock();
   state.choiceSource = source;
   state.mode = "upgrade";
   state.currentChoices = rollUpgradeChoices(source);
@@ -1835,6 +1995,7 @@ function chooseUpgrade(index) {
   state.currentChoices = [];
   state.mode = "playing";
   updateHud(true);
+  requestGamePointerLock();
   if (state.player.xp >= state.player.xpNeeded) {
     addXp(0);
   }
@@ -1896,6 +2057,7 @@ function describeUpgrade(upgrade, rarity) {
     projectile: "Adds extra shots or blades to several weapons.",
     xp: `Experience gained +${Math.round(14 * power)}%.`,
     luck: `Rare odds and chip drops +${Math.round(10 * power)}%.`,
+    attune: `Shrine charge speed +${Math.round(22 * power)}%.`,
     shield: "Adds a recharging barrier stack.",
     thorns: `Touching enemies take ${Math.round(10 * power)} backfire damage.`,
     evasion: `Dodge chance +${Math.round(4 * power)}%.`,
@@ -1959,6 +2121,9 @@ function applyUpgrade(choice) {
         break;
       case "luck":
         player.luck += 0.1 * power;
+        break;
+      case "attune":
+        player.shrineSpeed += 0.22 * power;
         break;
       case "evasion":
         player.evasion = Math.min(0.45, player.evasion + 0.04 * power);
@@ -2033,6 +2198,7 @@ function updateMetaUnlocks() {
 
 function endRun(victory) {
   if (state.mode === "over") return;
+  releaseGamePointerLock();
   state.mode = "over";
   const meta = state.meta;
   meta.runs += 1;
@@ -2061,10 +2227,59 @@ function endRun(victory) {
 function togglePause(paused) {
   if (paused) {
     state.mode = "paused";
+    releaseGamePointerLock();
     dom.pause.classList.remove("hidden");
   } else {
     state.mode = "playing";
     dom.pause.classList.add("hidden");
+    requestGamePointerLock();
+  }
+}
+
+function returnToMenu() {
+  releaseGamePointerLock();
+  clearWorld();
+  state.mode = "menu";
+  state.player = null;
+  state.playerObj = null;
+  state.enemies = [];
+  state.enemyBullets = [];
+  state.projectiles = [];
+  state.drops = [];
+  state.chests = [];
+  state.shrines = [];
+  state.shops = [];
+  state.effects = [];
+  state.orbiters = [];
+  state.gate = null;
+  state.currentChoices = [];
+  state.weaponTimers = {};
+  state.runStats = null;
+  state.lastObjective = "";
+  dom.hud.classList.add("hidden");
+  dom.pause.classList.add("hidden");
+  dom.chooser.classList.add("hidden");
+  dom.result.classList.add("hidden");
+  dom.menu.classList.remove("hidden");
+  syncMenuLocks();
+  updateMenuMeta();
+  render();
+}
+
+function requestGamePointerLock() {
+  if (state.mode !== "playing" || document.pointerLockElement === canvas || !canvas.requestPointerLock) return;
+  try {
+    const request = canvas.requestPointerLock();
+    request?.catch?.(() => {});
+  } catch {
+    // Pointer lock is best-effort because browsers require a trusted user gesture.
+  }
+}
+
+function releaseGamePointerLock() {
+  pointer.rotating = false;
+  if (document.pointerLockElement === canvas) {
+    document.exitPointerLock?.();
   }
 }
 
@@ -2114,6 +2329,10 @@ function currentObjective() {
   if (chest) {
     return state.player.coins >= chest.cost ? `Press E to open cache (${chest.cost})` : `Need ${chest.cost} chips for cache`;
   }
+  const shrine = state.shrines.find(
+    (candidate) => !candidate.charged && distance2d(candidate, state.player) < candidate.radius + 0.6,
+  );
+  if (shrine) return `Charging shrine ${Math.floor(shrine.charge * 100)}%`;
   const shop = state.shops.find((candidate) => !candidate.bought && distance2d(candidate, state.player) < candidate.radius + 0.8);
   if (shop) return state.player.coins >= shop.cost ? "Press E to buy reward" : `Need ${shop.cost} chips`;
   if (state.gate && state.player) {
@@ -2201,8 +2420,11 @@ function spawnPointAroundPlayer() {
 
 function randomArenaPoint(minRadius = 0, maxRadius = ARENA_RADIUS - 8) {
   for (let i = 0; i < 80; i += 1) {
-    const angle = state.rng() * Math.PI * 2;
-    const radius = minRadius + state.rng() * (maxRadius - minRadius);
+    const clusterTurn = Math.floor(state.rng() * 7);
+    const angle = clusterTurn * 0.9 + (state.rng() - 0.5) * (state.rng() < 0.45 ? 0.9 : Math.PI * 2);
+    const radiusRoll = state.rng();
+    const radiusShape = state.rng() < 0.55 ? radiusRoll ** 0.46 : radiusRoll ** 1.9;
+    const radius = minRadius + radiusShape * (maxRadius - minRadius);
     const x = Math.cos(angle) * radius;
     const z = Math.sin(angle) * radius;
     if (Math.hypot(x, z) < ARENA_RADIUS - 5) return { x, z };
@@ -2265,11 +2487,21 @@ function updateEffects(dt) {
 
 function groundHeight(x, z) {
   const seed = state.terrainSeed || 1;
+  const broadNoise = smoothNoise2d(x, z, 0.026, 13) * 2 - 1;
+  const brokenNoise = smoothNoise2d(x, z, 0.085, 29) * 2 - 1;
+  const faultA = Math.sin(x * 0.062 + z * 0.019 + seed * 0.37);
+  const faultB = Math.sin(x * -0.028 + z * 0.074 + seed * 0.19);
+  const shelf = Math.sign(faultA) * 0.55 + Math.sign(faultB) * 0.38;
+  const pocket = Math.max(0, smoothNoise2d(x + 140, z - 80, 0.055, 47) - 0.62) * 4.2;
   const ridge =
     Math.sin((x + seed * 0.11) * 0.047) * 1.8 +
     Math.cos((z - seed * 0.07) * 0.052) * 1.45 +
-    Math.sin((x + z + seed) * 0.027) * 1.1;
-  const terrace = Math.round(ridge * 0.85) / 0.85;
+    Math.sin((x + z + seed) * 0.027) * 1.1 +
+    broadNoise * 2.15 +
+    brokenNoise * 0.85 +
+    shelf -
+    pocket;
+  const terrace = Math.round(ridge * 0.72) / 0.72;
   const edge = THREE.MathUtils.smoothstep(Math.hypot(x, z), ARENA_RADIUS - 16, ARENA_RADIUS + 8);
   return terrace * (1 - edge) - edge * 4;
 }
@@ -2320,7 +2552,19 @@ function syncMenuLocks() {
     slot.classList.toggle("locked", !unlocked);
     if (id === selectedCharacter && !unlocked) selectedCharacter = "lume";
     slot.classList.toggle("active", id === selectedCharacter);
+    let badge = slot.querySelector(".slot-badge");
+    if (!badge) {
+      badge = document.createElement("small");
+      badge.className = "slot-badge";
+      slot.append(badge);
+    }
+    badge.textContent = unlocked ? (id === selectedCharacter ? "Selected" : "Ready") : "Locked";
   });
+  if (dom.selectedSummary) {
+    const def = characters[selectedCharacter] || characters.lume;
+    const weapon = upgradeById[def.startWeapon]?.name || def.startWeapon;
+    dom.selectedSummary.textContent = `${def.name} selected - starts with ${weapon}`;
+  }
   updateMenuMeta();
 }
 
@@ -2394,6 +2638,7 @@ function loadMeta() {
   try {
     const parsed = JSON.parse(localStorage.getItem(META_KEY) || "{}");
     return {
+      lastCharacter: characters[parsed.lastCharacter] ? parsed.lastCharacter : "lume",
       runs: parsed.runs || 0,
       wins: parsed.wins || 0,
       totalKills: parsed.totalKills || 0,
@@ -2415,6 +2660,7 @@ function loadMeta() {
     };
   } catch {
     return {
+      lastCharacter: "lume",
       runs: 0,
       wins: 0,
       totalKills: 0,
@@ -2451,6 +2697,28 @@ function createRng(seed) {
   };
 }
 
+function hashNoise2d(x, z, offset = 0) {
+  const seed = state.terrainSeed || 1;
+  const value = Math.sin(x * 127.1 + z * 311.7 + (seed + offset) * 74.7) * 43758.5453123;
+  return value - Math.floor(value);
+}
+
+function smoothNoise2d(x, z, scale, offset = 0) {
+  const sx = x * scale;
+  const sz = z * scale;
+  const x0 = Math.floor(sx);
+  const z0 = Math.floor(sz);
+  const tx = sx - x0;
+  const tz = sz - z0;
+  const ux = tx * tx * (3 - 2 * tx);
+  const uz = tz * tz * (3 - 2 * tz);
+  const a = hashNoise2d(x0, z0, offset);
+  const b = hashNoise2d(x0 + 1, z0, offset);
+  const c = hashNoise2d(x0, z0 + 1, offset);
+  const d = hashNoise2d(x0 + 1, z0 + 1, offset);
+  return THREE.MathUtils.lerp(THREE.MathUtils.lerp(a, b, ux), THREE.MathUtils.lerp(c, d, ux), uz);
+}
+
 function renderGameToText() {
   const player = state.player;
   const boss = state.enemies.find((enemy) => enemy.boss);
@@ -2473,8 +2741,12 @@ function renderGameToText() {
           coins: player.coins,
           weapons: player.weapons,
           shield: player.shieldCharges,
+          crouching: player.crouching,
+          sliding: player.sliding,
+          shrineSpeed: Number(player.shrineSpeed.toFixed(2)),
         }
       : null,
+    cursorLocked: document.pointerLockElement === canvas,
     camera: {
       yaw: Number(cameraRig.targetYaw.toFixed(2)),
       pitch: Number(cameraRig.targetPitch.toFixed(2)),
@@ -2518,7 +2790,10 @@ function renderGameToText() {
             state.chests.find((chest) => !chest.opened && distance2d(chest, player) < chest.radius + 0.8)?.cost ?? null,
           shrines: state.shrines
             .filter((shrine) => !shrine.charged && distance2d(shrine, player) < 18)
-            .map((shrine) => Number(shrine.charge.toFixed(2))),
+            .map((shrine) => ({
+              charge: Number(shrine.charge.toFixed(2)),
+              secondsRemaining: Number(((1 - shrine.charge) * SHRINE_CHARGE_SECONDS / player.shrineSpeed).toFixed(1)),
+            })),
           shops: state.shops.filter((shop) => !shop.bought && distance2d(shop, player) < 18).length,
         }
       : null,

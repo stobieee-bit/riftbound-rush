@@ -83,6 +83,8 @@ const SHRINE_CHARGE_SECONDS = 5;
 const RUN_TIME_LIMIT_SECONDS = 600;
 const MAX_GROUNDED_STEP_HEIGHT = 0.58;
 const AIR_LEDGE_CLEARANCE = 0.24;
+const CHEST_BASE_COST = 5;
+const SHOP_BASE_COST = 18;
 const CROUCH_KEYS = ["ControlLeft", "ControlRight", "KeyQ"];
 const GAME_INPUT_CODES = new Set([
   "KeyW",
@@ -236,6 +238,24 @@ const upgrades = [
     description: "Fires a forward fan of short-lived shards at nearby enemies.",
   },
   {
+    id: "skyLance",
+    name: "Sky Lance",
+    type: "weapon",
+    max: 7,
+    unlock: (meta) => meta.unlocks.skyLance,
+    tags: ["weapon", "projectile", "movement"],
+    description: "Throws piercing lances that fire harder while airborne.",
+  },
+  {
+    id: "driftSaw",
+    name: "Drift Saw",
+    type: "weapon",
+    max: 7,
+    unlock: (meta) => meta.unlocks.driftSaw,
+    tags: ["weapon", "area", "movement"],
+    description: "Launches cutting wheels that accelerate while sliding.",
+  },
+  {
     id: "damage",
     name: "Cracked Sun Lens",
     type: "relic",
@@ -356,6 +376,15 @@ const upgrades = [
     description: "Charges shrines faster.",
   },
   {
+    id: "votive",
+    name: "Votive Lens",
+    type: "relic",
+    max: 4,
+    unlock: (meta) => meta.unlocks.votive,
+    tags: ["utility", "luck"],
+    description: "Improves shrine rewards and pays chips when a shrine completes.",
+  },
+  {
     id: "shield",
     name: "Quiet Shell",
     type: "relic",
@@ -390,6 +419,15 @@ const upgrades = [
     description: "Increases chip value from drops.",
   },
   {
+    id: "market",
+    name: "Market Token",
+    type: "codex",
+    max: 4,
+    unlock: (meta) => meta.unlocks.market,
+    tags: ["loot"],
+    description: "Discounts cache and pedestal prices.",
+  },
+  {
     id: "bossBane",
     name: "Gatebreaker Ink",
     type: "codex",
@@ -397,6 +435,15 @@ const upgrades = [
     unlock: (meta) => meta.unlocks.bossBane,
     tags: ["boss"],
     description: "Deals bonus damage to rift bosses.",
+  },
+  {
+    id: "dawnAnchor",
+    name: "Dawn Anchor",
+    type: "relic",
+    max: 5,
+    unlock: (meta) => meta.unlocks.dawnAnchor,
+    tags: ["defense", "damage"],
+    description: "Gets stronger during the Final Swarm.",
   },
 ];
 
@@ -410,7 +457,7 @@ const enemyTypes = {
     damage: 9,
     radius: 1.05,
     xp: 5,
-    coins: 0.16,
+    coins: 0.17,
     geometry: "cone",
   },
   bruiser: {
@@ -420,7 +467,7 @@ const enemyTypes = {
     damage: 15,
     radius: 1.45,
     xp: 13,
-    coins: 0.35,
+    coins: 0.5,
     geometry: "box",
   },
   wisp: {
@@ -430,7 +477,7 @@ const enemyTypes = {
     damage: 7,
     radius: 0.86,
     xp: 7,
-    coins: 0.22,
+    coins: 0.3,
     geometry: "sphere",
     flying: true,
   },
@@ -441,7 +488,7 @@ const enemyTypes = {
     damage: 5,
     radius: 0.7,
     xp: 3,
-    coins: 0.1,
+    coins: 0.11,
     geometry: "tetra",
   },
   crasher: {
@@ -451,7 +498,7 @@ const enemyTypes = {
     damage: 18,
     radius: 1.05,
     xp: 10,
-    coins: 0.24,
+    coins: 0.38,
     geometry: "wedge",
     charge: true,
   },
@@ -462,7 +509,7 @@ const enemyTypes = {
     damage: 8,
     radius: 0.92,
     xp: 9,
-    coins: 0.2,
+    coins: 0.34,
     geometry: "diamond",
     shooter: true,
     flying: true,
@@ -692,6 +739,10 @@ function startRun() {
     chests: 0,
     shrines: 0,
     shops: 0,
+    jumps: 0,
+    slides: 0,
+    chipsEarned: 0,
+    chipsSpent: 0,
     bossSpawned: false,
     bossDefeated: false,
     finalSwarm: false,
@@ -727,8 +778,14 @@ function startRun() {
     luck: 0,
     evasion: 0,
     coinMult: 1,
+    chipMeter: 0,
+    priceMult: 1,
     projectileBonus: 0,
     bossDamageMult: 1,
+    shrineLuck: 0,
+    shrinePayout: 0,
+    finalSwarmPower: 0,
+    finalSwarmGuard: 0,
     dashCooldown: 1.9,
     dashTimer: 0,
     dashInvuln: 0,
@@ -897,9 +954,30 @@ function scatterWorldObjects() {
   createBossGate(gatePoint.x, gatePoint.z);
 }
 
+function chestCostForIndex(index) {
+  return CHEST_BASE_COST + index * 3 + Math.floor((index * index) / 3);
+}
+
+function shopCostForIndex(index) {
+  return SHOP_BASE_COST + index * 7;
+}
+
+function effectiveCost(baseCost) {
+  const multiplier = state.player?.priceMult ?? 1;
+  return Math.max(1, Math.ceil(baseCost * multiplier));
+}
+
+function spendChips(baseCost) {
+  const cost = effectiveCost(baseCost);
+  if (!state.player || state.player.coins < cost) return { ok: false, cost };
+  state.player.coins -= cost;
+  if (state.runStats) state.runStats.chipsSpent += cost;
+  return { ok: true, cost };
+}
+
 function createChest(x, z, index) {
   const y = groundHeight(x, z);
-  const cost = 6 + Math.floor(index * 1.5);
+  const cost = chestCostForIndex(index);
   const mesh = new THREE.Group();
   const base = new THREE.Mesh(
     new THREE.BoxGeometry(2.5, 1.45, 1.75),
@@ -1045,7 +1123,7 @@ function createShop(x, z, index) {
   group.position.set(x, y, z);
   group.rotation.y = index * 0.72;
   state.groups.props.add(group);
-  state.shops.push({ x, y, z, mesh: group, radius: 3.8, cost: 24, bought: false });
+  state.shops.push({ x, y, z, mesh: group, radius: 3.8, cost: shopCostForIndex(index), bought: false });
 }
 
 function createBossGate(x, z) {
@@ -1184,6 +1262,7 @@ function updatePlayer(dt) {
     const slideSpeed = Math.max(horizontalSpeed * 1.18, player.speed * 1.62);
     player.vx = dirX * slideSpeed;
     player.vz = dirZ * slideSpeed;
+    state.runStats.slides += 1;
     spawnBurst(player.x, player.y + 0.25, player.z, 0xbff4ff, 5, 1.2);
   }
 
@@ -1213,6 +1292,7 @@ function updatePlayer(dt) {
     player.vy = 12.5 + (player.maxJumps - 1) * 0.8;
     player.jumpsLeft -= 1;
     player.grounded = false;
+    state.runStats.jumps += 1;
   }
 
   if (player.dashTimer > 0) {
@@ -1335,8 +1415,13 @@ function updateWorldObjects(dt) {
         state.runStats.shrines += 1;
         shrine.mesh.scale.setScalar(1.25);
         syncShrineProgress(shrine, true);
+        const shrineChips = Math.round(player.shrinePayout);
+        if (shrineChips > 0) {
+          player.coins += shrineChips;
+          state.runStats.chipsEarned += shrineChips;
+        }
         showUpgradeChooser("shrine");
-        showToast("Shrine charged.");
+        showToast(shrineChips > 0 ? `Shrine charged. +${shrineChips} chips.` : "Shrine charged.");
         break;
       }
     } else {
@@ -1357,14 +1442,15 @@ function updateWorldObjects(dt) {
     for (const shop of state.shops) {
       if (shop.bought) continue;
       if (distance2d(player, shop) < shop.radius) {
-        if (player.coins >= shop.cost) {
-          player.coins -= shop.cost;
+        const purchase = spendChips(shop.cost);
+        if (purchase.ok) {
           shop.bought = true;
           shop.mesh.scale.setScalar(0.82);
           state.runStats.shops += 1;
+          showToast(`Pedestal reward bought for ${purchase.cost} chips.`);
           showUpgradeChooser("shop");
         } else {
-          showToast(`Need ${shop.cost} chips for this pedestal.`);
+          showToast(`Need ${purchase.cost} chips for this pedestal.`);
         }
         return;
       }
@@ -1381,17 +1467,17 @@ function updateWorldObjects(dt) {
 }
 
 function openChest(chest) {
-  if (state.player.coins < chest.cost) {
-    showToast(`Need ${chest.cost} chips to open this cache.`);
+  const purchase = spendChips(chest.cost);
+  if (!purchase.ok) {
+    showToast(`Need ${purchase.cost} chips to open this cache.`);
     return false;
   }
-  state.player.coins -= chest.cost;
   chest.opened = true;
   chest.openAmount = 1;
   syncChestOpenVisual(chest);
   state.runStats.chests += 1;
   spawnBurst(chest.x, chest.y + 1.4, chest.z, 0xf7c948, 18);
-  showToast(`Cache opened for ${chest.cost} chips.`);
+  showToast(`Cache opened for ${purchase.cost} chips.`);
   showUpgradeChooser("chest");
   return true;
 }
@@ -1596,6 +1682,8 @@ function updateWeapons(dt) {
   if (weapons.pulse) updatePulse(dt, weapons.pulse);
   if (weapons.comet) updateComet(dt, weapons.comet);
   if (weapons.prism) updatePrism(dt, weapons.prism);
+  if (weapons.skyLance) updateSkyLance(dt, weapons.skyLance);
+  if (weapons.driftSaw) updateDriftSaw(dt, weapons.driftSaw);
   if (weapons.mine) updateMines(dt, weapons.mine);
   if (weapons.chain) updateChain(dt, weapons.chain);
   if (weapons.orbit) updateOrbiters(dt, weapons.orbit);
@@ -1669,6 +1757,61 @@ function updatePrism(dt, level) {
       ttl: 0.95,
       pierce: Math.floor(level / 3),
       color: 0xf0fbff,
+    });
+  }
+}
+
+function updateSkyLance(dt, level) {
+  state.weaponTimers.skyLance = (state.weaponTimers.skyLance ?? 0) - dt;
+  const airborne = !state.player.grounded || state.player.vy > 0.6;
+  const cooldown = Math.max(0.28, (1.36 - level * 0.06) / (state.player.attackSpeed * (airborne ? 1.45 : 1)));
+  if (state.weaponTimers.skyLance > 0) return;
+  const target = nearestEnemy(72);
+  if (!target) return;
+  state.weaponTimers.skyLance = cooldown;
+
+  const shots = 1 + Math.floor((level - 1) / 4) + (airborne ? 1 : 0) + Math.min(2, state.player.projectileBonus);
+  const baseAngle = Math.atan2(target.z - state.player.z, target.x - state.player.x);
+  for (let i = 0; i < shots; i += 1) {
+    const spread = (i - (shots - 1) / 2) * 0.1;
+    fireProjectile({
+      type: "skyLance",
+      angle: baseAngle + spread,
+      speed: airborne ? 40 : 32,
+      damage: (13 + level * 4.8) * (airborne ? 1.45 : 1),
+      radius: 0.34,
+      ttl: 1.55,
+      pierce: Math.floor(level / 3) + (airborne ? 1 : 0),
+      color: 0xb7f7ff,
+    });
+  }
+}
+
+function updateDriftSaw(dt, level) {
+  state.weaponTimers.driftSaw = (state.weaponTimers.driftSaw ?? 0) - dt;
+  const sliding = state.player.sliding;
+  const cooldown = Math.max(0.24, (1.18 - level * 0.045) / (state.player.attackSpeed * (sliding ? 1.7 : 1)));
+  if (state.weaponTimers.driftSaw > 0) return;
+  const target = nearestEnemy(sliding ? 64 : 48);
+  if (!target) return;
+  state.weaponTimers.driftSaw = cooldown;
+
+  const speed = Math.hypot(state.player.vx, state.player.vz);
+  const movingAngle =
+    speed > 0.4 ? Math.atan2(state.player.vz, state.player.vx) : Math.atan2(target.z - state.player.z, target.x - state.player.x);
+  const baseAngle = sliding ? movingAngle : Math.atan2(target.z - state.player.z, target.x - state.player.x);
+  const shots = 1 + Math.floor((level - 1) / 4) + (sliding ? 1 : 0) + Math.min(2, state.player.projectileBonus);
+  for (let i = 0; i < shots; i += 1) {
+    const spread = (i - (shots - 1) / 2) * 0.18;
+    fireProjectile({
+      type: "driftSaw",
+      angle: baseAngle + spread,
+      speed: sliding ? 35 : 25,
+      damage: (9 + level * 3.8) * (sliding ? 1.35 : 1),
+      radius: 0.48 * state.player.area,
+      ttl: sliding ? 1.45 : 1.2,
+      pierce: 1 + Math.floor(level / 3) + (sliding ? 1 : 0),
+      color: 0xffd36b,
     });
   }
 }
@@ -1780,10 +1923,7 @@ function clearOrbiters() {
 
 function fireProjectile(config) {
   const player = state.player;
-  const geometry =
-    config.type === "comet"
-      ? new THREE.IcosahedronGeometry(config.radius, 0)
-      : new THREE.SphereGeometry(config.radius, 8, 8);
+  const geometry = projectileGeometry(config);
   const material = new THREE.MeshStandardMaterial({
     color: config.color,
     emissive: config.color,
@@ -1807,9 +1947,18 @@ function fireProjectile(config) {
     mesh,
     hit: new Set(),
   };
+  if (config.type === "driftSaw") mesh.rotation.x = Math.PI / 2;
+  if (config.type === "skyLance") mesh.rotation.z = -Math.PI / 2;
   mesh.position.set(projectile.x, projectile.y, projectile.z);
   state.groups.projectiles.add(mesh);
   state.projectiles.push(projectile);
+}
+
+function projectileGeometry(config) {
+  if (config.type === "comet") return new THREE.IcosahedronGeometry(config.radius, 0);
+  if (config.type === "driftSaw") return new THREE.CylinderGeometry(config.radius, config.radius, 0.18, 14);
+  if (config.type === "skyLance") return new THREE.ConeGeometry(config.radius, config.radius * 3.2, 8);
+  return new THREE.SphereGeometry(config.radius, 8, 8);
 }
 
 function updateProjectiles(dt) {
@@ -2095,7 +2244,8 @@ function damagePlayer(amount) {
     spawnBurst(player.x, player.y + 1.2, player.z, 0x9ff7ff, 12, 2.2);
     return;
   }
-  const damage = Math.max(1, amount - player.armor);
+  const finalGuard = state.runStats?.finalSwarm ? player.finalSwarmGuard : 0;
+  const damage = Math.max(1, amount * Math.max(0.55, 1 - finalGuard) - player.armor);
   player.hp -= damage;
   player.invuln = 0.55;
   spawnBurst(player.x, player.y + 1.2, player.z, 0xe95353, 8, 1.8);
@@ -2105,6 +2255,7 @@ function dealDamage(enemy, amount, source) {
   if (enemy.dead) return;
   let damage = amount * state.player.damageMult;
   if (enemy.boss) damage *= state.player.bossDamageMult;
+  if (state.runStats?.finalSwarm) damage *= 1 + state.player.finalSwarmPower;
   if (state.rng() < state.player.critChance) damage *= state.player.critMult;
   if (source === "pulse" && hasSynergy("pulse", "projectile")) damage *= 1.08;
   enemy.hp -= damage;
@@ -2126,8 +2277,12 @@ function killEnemy(enemy) {
   state.runStats.kills += 1;
   state.runStats.score += enemy.boss ? 5000 : Math.round(enemy.maxHp);
   spawnDrop(enemy.x, enemy.y, enemy.z, enemy.xp, "xp");
-  if (state.rng() < enemy.coins + state.player.luck * 0.04) {
-    spawnDrop(enemy.x + state.rng() * 1.4 - 0.7, enemy.y, enemy.z + state.rng() * 1.4 - 0.7, 1, "coin");
+  const chipProgress = enemy.coins + state.player.luck * 0.055;
+  state.player.chipMeter += chipProgress;
+  const meterChips = Math.floor(state.player.chipMeter);
+  if (meterChips > 0) {
+    state.player.chipMeter -= meterChips;
+    spawnDrop(enemy.x + state.rng() * 1.4 - 0.7, enemy.y, enemy.z + state.rng() * 1.4 - 0.7, meterChips, "coin");
   }
   if (enemy.boss) {
     state.runStats.bossDefeated = true;
@@ -2135,7 +2290,7 @@ function killEnemy(enemy) {
     endRun(true);
   } else if (enemy.elite) {
     state.runStats.elites += 1;
-    if (state.rng() < 0.45) spawnDrop(enemy.x, enemy.y, enemy.z, 9, "coin");
+    spawnDrop(enemy.x, enemy.y, enemy.z, 5 + Math.floor(state.runStats.time / 180), "coin");
   }
   state.groups.enemies.remove(enemy.mesh);
   enemy.mesh.traverse?.((node) => {
@@ -2189,7 +2344,9 @@ function updateDrops(dt) {
     drop.mesh.rotation.y += dt * 4;
     if (dist < player.radius + 0.9) {
       if (drop.type === "coin") {
-        player.coins += Math.max(1, Math.round(drop.value * player.coinMult));
+        const chips = Math.max(1, Math.round(drop.value * player.coinMult));
+        player.coins += chips;
+        state.runStats.chipsEarned += chips;
       } else {
         addXp(drop.value * player.xpMult);
       }
@@ -2289,6 +2446,7 @@ function rollRarity(source) {
   if (source === "shrine") roll += 0.23;
   if (source === "shop") roll += 0.1;
   roll += luck * 0.055;
+  if (source === "shrine") roll += state.player.shrineLuck;
   if (roll > 0.985) return "legendary";
   if (roll > 0.89) return "epic";
   if (roll > 0.63) return "rare";
@@ -2314,13 +2472,16 @@ function describeUpgrade(upgrade, rarity) {
     area: `Area effects +${Math.round(12 * power)}%.`,
     projectile: "Adds extra shots or blades to several weapons.",
     xp: `Experience gained +${Math.round(14 * power)}%.`,
-    luck: `Rare odds and chip drops +${Math.round(10 * power)}%.`,
+    luck: `Rare odds and chip meter +${Math.round(10 * power)}%.`,
     attune: `Shrine charge speed +${Math.round(22 * power)}%.`,
+    votive: `Shrine rare odds +${Math.round(5 * power)}% and shrine payout +${Math.round(2 * power)} chips.`,
     shield: "Adds a recharging barrier stack.",
     thorns: `Touching enemies take ${Math.round(10 * power)} backfire damage.`,
     evasion: `Dodge chance +${Math.round(4 * power)}%.`,
     greed: `Chip value +${Math.round(20 * power)}%.`,
+    market: `Cache and pedestal prices -${Math.round(9 * power)}%.`,
     bossBane: `Boss damage +${Math.round(18 * power)}%.`,
+    dawnAnchor: `Final Swarm damage +${Math.round(8 * power)}%, incoming damage -${Math.round(4 * power)}%.`,
   };
   return `${upgrade.description} ${details[upgrade.id] || ""}`;
 }
@@ -2383,11 +2544,19 @@ function applyUpgrade(choice) {
       case "attune":
         player.shrineSpeed += 0.22 * power;
         break;
+      case "votive":
+        player.shrineLuck += 0.05 * power;
+        player.shrineSpeed += 0.08 * power;
+        player.shrinePayout += 2 * power;
+        break;
       case "evasion":
         player.evasion = Math.min(0.45, player.evasion + 0.04 * power);
         break;
       case "greed":
         player.coinMult += 0.2 * power;
+        break;
+      case "market":
+        player.priceMult = Math.max(0.55, player.priceMult * (1 - 0.09 * power));
         break;
       case "shield":
         player.shieldMax += 1;
@@ -2399,6 +2568,10 @@ function applyUpgrade(choice) {
         break;
       case "bossBane":
         player.bossDamageMult += 0.18 * power;
+        break;
+      case "dawnAnchor":
+        player.finalSwarmPower += 0.08 * power;
+        player.finalSwarmGuard = Math.min(0.4, player.finalSwarmGuard + 0.04 * power);
         break;
       default:
         break;
@@ -2446,6 +2619,26 @@ function updateMetaUnlocks() {
     meta.unlocks.greed = true;
     unlocked.push("Chip Engine");
   }
+  if (!meta.unlocks.skyLance && state.runStats.jumps >= 35) {
+    meta.unlocks.skyLance = true;
+    unlocked.push("Sky Lance");
+  }
+  if (!meta.unlocks.driftSaw && state.runStats.slides >= 8) {
+    meta.unlocks.driftSaw = true;
+    unlocked.push("Drift Saw");
+  }
+  if (!meta.unlocks.votive && state.runStats.shrines >= 3) {
+    meta.unlocks.votive = true;
+    unlocked.push("Votive Lens");
+  }
+  if (!meta.unlocks.market && state.runStats.chipsSpent >= 80) {
+    meta.unlocks.market = true;
+    unlocked.push("Market Token");
+  }
+  if (!meta.unlocks.dawnAnchor && state.runStats.finalSwarmTime >= 45) {
+    meta.unlocks.dawnAnchor = true;
+    unlocked.push("Dawn Anchor");
+  }
   if (unlocked.length) {
     state.runStats.unlocks.push(...unlocked);
     saveMeta();
@@ -2464,6 +2657,11 @@ function endRun(victory) {
   meta.bestKills = Math.max(meta.bestKills, state.runStats.kills);
   meta.bestTime = Math.max(meta.bestTime, Math.floor(state.runStats.time));
   meta.bestScore = Math.max(meta.bestScore, state.runStats.score);
+  meta.bestJumps = Math.max(meta.bestJumps || 0, state.runStats.jumps);
+  meta.bestSlides = Math.max(meta.bestSlides || 0, state.runStats.slides);
+  meta.bestShrines = Math.max(meta.bestShrines || 0, state.runStats.shrines);
+  meta.bestChipsSpent = Math.max(meta.bestChipsSpent || 0, state.runStats.chipsSpent);
+  meta.bestFinalSwarmTime = Math.max(meta.bestFinalSwarmTime || 0, Math.floor(state.runStats.finalSwarmTime));
   if (victory) meta.wins += 1;
   saveMeta();
   updateMenuMeta();
@@ -2477,6 +2675,7 @@ function endRun(victory) {
     `Best Score: ${meta.bestScore}`,
     state.runStats.finalSwarm ? `Final Swarm: ${formatTime(state.runStats.finalSwarmTime)}` : "Final Swarm: not reached",
     `Caches/Shrines/Shops: ${state.runStats.chests}/${state.runStats.shrines}/${state.runStats.shops}`,
+    `Chips: ${state.runStats.chipsEarned} earned / ${state.runStats.chipsSpent} spent`,
     state.runStats.unlocks.length ? `Unlocked: ${state.runStats.unlocks.join(", ")}` : "Unlocked: none this run",
   ].join("<br>");
   dom.result.classList.remove("hidden");
@@ -2592,14 +2791,18 @@ function currentObjective() {
   }
   const chest = state.chests.find((candidate) => !candidate.opened && distance2d(candidate, state.player) < candidate.radius + 0.8);
   if (chest) {
-    return state.player.coins >= chest.cost ? `Press E to open cache (${chest.cost})` : `Need ${chest.cost} chips for cache`;
+    const cost = effectiveCost(chest.cost);
+    return state.player.coins >= cost ? `Press E to open cache (${cost})` : `Need ${cost} chips for cache`;
   }
   const shrine = state.shrines.find(
     (candidate) => !candidate.charged && distance2d(candidate, state.player) < candidate.radius + 0.6,
   );
   if (shrine) return `Charging shrine ${Math.floor(shrine.charge * 100)}%`;
   const shop = state.shops.find((candidate) => !candidate.bought && distance2d(candidate, state.player) < candidate.radius + 0.8);
-  if (shop) return state.player.coins >= shop.cost ? "Press E to buy reward" : `Need ${shop.cost} chips`;
+  if (shop) {
+    const cost = effectiveCost(shop.cost);
+    return state.player.coins >= cost ? `Press E to buy reward (${cost})` : `Need ${cost} chips`;
+  }
   if (state.gate && state.player) {
     const dist = Math.ceil(distance2d(state.gate, state.player));
     return dist < 8 ? "Press E at the rift gate" : `Find rift gate ${dist}m`;
@@ -2892,6 +3095,31 @@ function updateMenuMeta() {
       detail: "hold 60 chips in one run",
     },
     {
+      name: "Sky Lance",
+      done: meta.unlocks.skyLance,
+      detail: `${Math.min(meta.bestJumps || 0, 35)}/35 jumps in one run`,
+    },
+    {
+      name: "Drift Saw",
+      done: meta.unlocks.driftSaw,
+      detail: `${Math.min(meta.bestSlides || 0, 8)}/8 slides in one run`,
+    },
+    {
+      name: "Votive Lens",
+      done: meta.unlocks.votive,
+      detail: `${Math.min(meta.bestShrines || 0, 3)}/3 shrines charged in one run`,
+    },
+    {
+      name: "Market Token",
+      done: meta.unlocks.market,
+      detail: `${Math.min(meta.bestChipsSpent || 0, 80)}/80 chips spent in one run`,
+    },
+    {
+      name: "Dawn Anchor",
+      done: meta.unlocks.dawnAnchor,
+      detail: `${formatTime(Math.min(meta.bestFinalSwarmTime || 0, 45))}/00:45 Final Swarm survival`,
+    },
+    {
       name: "Gatebreaker Ink",
       done: meta.unlocks.bossBane,
       detail: `${Math.min(meta.bestScore, 2500)}/2500 best score`,
@@ -2916,6 +3144,11 @@ function loadMeta() {
       bestKills: parsed.bestKills || 0,
       bestTime: parsed.bestTime || 0,
       bestScore: parsed.bestScore || 0,
+      bestJumps: parsed.bestJumps || 0,
+      bestSlides: parsed.bestSlides || 0,
+      bestShrines: parsed.bestShrines || 0,
+      bestChipsSpent: parsed.bestChipsSpent || 0,
+      bestFinalSwarmTime: parsed.bestFinalSwarmTime || 0,
       unlocks: {
         nix: Boolean(parsed.unlocks?.nix),
         vesper: Boolean(parsed.unlocks?.vesper),
@@ -2926,6 +3159,11 @@ function loadMeta() {
         prism: Boolean(parsed.unlocks?.prism),
         evasion: Boolean(parsed.unlocks?.evasion),
         greed: Boolean(parsed.unlocks?.greed),
+        skyLance: Boolean(parsed.unlocks?.skyLance),
+        driftSaw: Boolean(parsed.unlocks?.driftSaw),
+        votive: Boolean(parsed.unlocks?.votive),
+        market: Boolean(parsed.unlocks?.market),
+        dawnAnchor: Boolean(parsed.unlocks?.dawnAnchor),
         bossBane: Boolean(parsed.unlocks?.bossBane),
       },
     };
@@ -2938,6 +3176,11 @@ function loadMeta() {
       bestKills: 0,
       bestTime: 0,
       bestScore: 0,
+      bestJumps: 0,
+      bestSlides: 0,
+      bestShrines: 0,
+      bestChipsSpent: 0,
+      bestFinalSwarmTime: 0,
       unlocks: {
         nix: false,
         vesper: false,
@@ -2948,6 +3191,11 @@ function loadMeta() {
         prism: false,
         evasion: false,
         greed: false,
+        skyLance: false,
+        driftSaw: false,
+        votive: false,
+        market: false,
+        dawnAnchor: false,
         bossBane: false,
       },
     };
@@ -2993,6 +3241,12 @@ function smoothNoise2d(x, z, scale, offset = 0) {
 function renderGameToText() {
   const player = state.player;
   const boss = state.enemies.find((enemy) => enemy.boss);
+  const nearbyChest = player
+    ? state.chests.find((chest) => !chest.opened && distance2d(chest, player) < chest.radius + 0.8)
+    : null;
+  const nearbyShop = player
+    ? state.shops.find((shop) => !shop.bought && distance2d(shop, player) < shop.radius + 0.8)
+    : null;
   const payload = {
     mode: state.mode,
     coordinateSystem: "Three.js world: x/z are horizontal arena axes, y is height, origin is arena center.",
@@ -3020,6 +3274,8 @@ function renderGameToText() {
           xp: Math.floor(player.xp),
           xpNeeded: player.xpNeeded,
           coins: player.coins,
+          chipMeter: Number(player.chipMeter.toFixed(2)),
+          priceMult: Number(player.priceMult.toFixed(2)),
           weapons: player.weapons,
           shield: player.shieldCharges,
           crouching: player.crouching,
@@ -3039,6 +3295,17 @@ function renderGameToText() {
       drops: state.drops.length,
       kills: state.runStats?.kills || 0,
     },
+    runStats: state.runStats
+      ? {
+          jumps: state.runStats.jumps,
+          slides: state.runStats.slides,
+          chipsEarned: state.runStats.chipsEarned,
+          chipsSpent: state.runStats.chipsSpent,
+          shrines: state.runStats.shrines,
+          chests: state.runStats.chests,
+          shops: state.runStats.shops,
+        }
+      : null,
     enemies: state.enemies.slice(0, 12).map((enemy) => ({
       type: enemy.type,
       x: Number(enemy.x.toFixed(1)),
@@ -3067,8 +3334,8 @@ function renderGameToText() {
     nearby: player
       ? {
           unopenedChests: state.chests.filter((chest) => !chest.opened && distance2d(chest, player) < 18).length,
-          chestCost:
-            state.chests.find((chest) => !chest.opened && distance2d(chest, player) < chest.radius + 0.8)?.cost ?? null,
+          chestCost: nearbyChest?.cost ?? null,
+          effectiveChestCost: nearbyChest ? effectiveCost(nearbyChest.cost) : null,
           shrines: state.shrines
             .filter((shrine) => !shrine.charged && distance2d(shrine, player) < 18)
             .map((shrine) => ({
@@ -3076,6 +3343,7 @@ function renderGameToText() {
               secondsRemaining: Number(((1 - shrine.charge) * SHRINE_CHARGE_SECONDS / player.shrineSpeed).toFixed(1)),
             })),
           shops: state.shops.filter((shop) => !shop.bought && distance2d(shop, player) < 18).length,
+          shopCost: nearbyShop ? effectiveCost(nearbyShop.cost) : null,
         }
       : null,
     choices: state.currentChoices.map((choice) => ({

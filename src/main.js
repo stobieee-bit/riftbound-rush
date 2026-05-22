@@ -53,6 +53,26 @@ const keys = new Set();
 const justPressed = new Set();
 let selectedCharacter = "lume";
 let toastTimer = 0;
+const pointer = {
+  rotating: false,
+  lastX: 0,
+  lastY: 0,
+};
+
+const cameraRig = {
+  yaw: -0.55,
+  pitch: 0.62,
+  distance: 82,
+  targetYaw: -0.55,
+  targetPitch: 0.62,
+  targetDistance: 82,
+};
+
+const DEFAULT_CAMERA = {
+  yaw: -0.55,
+  pitch: 0.62,
+  distance: 82,
+};
 
 const ARENA_RADIUS = 104;
 const TILE_SIZE = 8;
@@ -110,6 +130,30 @@ const characters = {
     attackSpeed: 1.18,
     armor: 0,
   },
+  orrin: {
+    id: "orrin",
+    name: "Orrin",
+    color: 0x61d394,
+    startWeapon: "mine",
+    hp: 118,
+    speed: 8,
+    pickup: 8,
+    damage: 1.02,
+    attackSpeed: 1,
+    armor: 1,
+  },
+  talia: {
+    id: "talia",
+    name: "Talia",
+    color: 0xff8d5b,
+    startWeapon: "chain",
+    hp: 92,
+    speed: 9.3,
+    pickup: 8.2,
+    damage: 0.98,
+    attackSpeed: 1.22,
+    armor: 0,
+  },
 };
 
 const upgrades = [
@@ -154,6 +198,15 @@ const upgrades = [
     unlock: (meta) => meta.unlocks.chain,
     tags: ["weapon", "chain"],
     description: "Snaps lightning between clustered enemies.",
+  },
+  {
+    id: "prism",
+    name: "Prism Fan",
+    type: "weapon",
+    max: 7,
+    unlock: (meta) => meta.unlocks.prism,
+    tags: ["weapon", "projectile"],
+    description: "Fires a forward fan of short-lived shards at nearby enemies.",
   },
   {
     id: "damage",
@@ -282,6 +335,24 @@ const upgrades = [
     max: 5,
     tags: ["defense", "damage"],
     description: "Damages enemies that touch you.",
+  },
+  {
+    id: "evasion",
+    name: "Smoke Frame",
+    type: "relic",
+    max: 5,
+    unlock: (meta) => meta.unlocks.evasion,
+    tags: ["defense", "luck"],
+    description: "Adds a chance to dodge incoming hits.",
+  },
+  {
+    id: "greed",
+    name: "Chip Engine",
+    type: "codex",
+    max: 5,
+    unlock: (meta) => meta.unlocks.greed,
+    tags: ["loot"],
+    description: "Increases chip value from drops.",
   },
   {
     id: "bossBane",
@@ -445,6 +516,9 @@ function setupUi() {
     if (event.code === "KeyF") {
       toggleFullscreen();
     }
+    if (event.code === "KeyC" && ["playing", "paused"].includes(state.mode)) {
+      resetCamera();
+    }
     if (event.code === "KeyP" && ["playing", "paused"].includes(state.mode)) {
       togglePause(state.mode === "playing");
     }
@@ -462,6 +536,35 @@ function setupUi() {
   window.addEventListener("keyup", (event) => {
     keys.delete(event.code);
   });
+
+  canvas.addEventListener("contextmenu", (event) => event.preventDefault());
+  canvas.addEventListener("pointerdown", (event) => {
+    if (event.button !== 2) return;
+    pointer.rotating = true;
+    pointer.lastX = event.clientX;
+    pointer.lastY = event.clientY;
+    canvas.setPointerCapture?.(event.pointerId);
+  });
+  canvas.addEventListener("pointermove", (event) => {
+    if (!pointer.rotating) return;
+    const dx = event.clientX - pointer.lastX;
+    const dy = event.clientY - pointer.lastY;
+    pointer.lastX = event.clientX;
+    pointer.lastY = event.clientY;
+    orbitCamera(dx * -0.006, dy * 0.0045);
+  });
+  window.addEventListener("pointerup", () => {
+    pointer.rotating = false;
+  });
+  canvas.addEventListener(
+    "wheel",
+    (event) => {
+      if (!["playing", "paused"].includes(state.mode)) return;
+      event.preventDefault();
+      cameraRig.targetDistance = THREE.MathUtils.clamp(cameraRig.targetDistance + event.deltaY * 0.08, 44, 118);
+    },
+    { passive: false },
+  );
 
   window.addEventListener("resize", resize);
 }
@@ -524,6 +627,8 @@ function startRun() {
     area: 1,
     xpMult: 1,
     luck: 0,
+    evasion: 0,
+    coinMult: 1,
     projectileBonus: 0,
     bossDamageMult: 1,
     dashCooldown: 1.9,
@@ -828,6 +933,7 @@ function update(dt) {
   toastTimer = Math.max(0, toastTimer - dt);
   if (toastTimer <= 0) dom.toast.classList.remove("show");
 
+  updateCameraControls(dt);
   updatePlayer(dt);
   updateWorldObjects(dt);
   updateDirector(dt);
@@ -845,19 +951,44 @@ function update(dt) {
   justPressed.clear();
 }
 
+function updateCameraControls(dt) {
+  if (keys.has("ArrowLeft")) cameraRig.targetYaw += dt * 1.8;
+  if (keys.has("ArrowRight")) cameraRig.targetYaw -= dt * 1.8;
+  if (keys.has("ArrowUp")) cameraRig.targetPitch += dt * 1.15;
+  if (keys.has("ArrowDown")) cameraRig.targetPitch -= dt * 1.15;
+  cameraRig.targetPitch = THREE.MathUtils.clamp(cameraRig.targetPitch, 0.34, 0.95);
+}
+
+function orbitCamera(deltaYaw, deltaPitch) {
+  cameraRig.targetYaw += deltaYaw;
+  cameraRig.targetPitch = THREE.MathUtils.clamp(cameraRig.targetPitch + deltaPitch, 0.34, 0.95);
+}
+
+function resetCamera() {
+  cameraRig.targetYaw = DEFAULT_CAMERA.yaw;
+  cameraRig.targetPitch = DEFAULT_CAMERA.pitch;
+  cameraRig.targetDistance = DEFAULT_CAMERA.distance;
+}
+
 function updatePlayer(dt) {
   const player = state.player;
   let mx = 0;
   let mz = 0;
-  if (keys.has("KeyW") || keys.has("ArrowUp")) mz -= 1;
-  if (keys.has("KeyS") || keys.has("ArrowDown")) mz += 1;
-  if (keys.has("KeyA") || keys.has("ArrowLeft")) mx -= 1;
-  if (keys.has("KeyD") || keys.has("ArrowRight")) mx += 1;
+  if (keys.has("KeyW")) mz += 1;
+  if (keys.has("KeyS")) mz -= 1;
+  if (keys.has("KeyA")) mx -= 1;
+  if (keys.has("KeyD")) mx += 1;
   const len = Math.hypot(mx, mz);
   if (len > 0) {
     mx /= len;
     mz /= len;
   }
+  const forwardX = -Math.sin(cameraRig.targetYaw);
+  const forwardZ = -Math.cos(cameraRig.targetYaw);
+  const rightX = Math.cos(cameraRig.targetYaw);
+  const rightZ = -Math.sin(cameraRig.targetYaw);
+  const moveX = rightX * mx + forwardX * mz;
+  const moveZ = rightZ * mx + forwardZ * mz;
 
   player.dashReady = Math.max(0, player.dashReady - dt);
   player.dashInvuln = Math.max(0, player.dashInvuln - dt);
@@ -874,8 +1005,8 @@ function updatePlayer(dt) {
     player.dashTimer = 0.18;
     player.dashReady = player.dashCooldown;
     player.dashInvuln = 0.32;
-    player.vx = mx * player.speed * 3.1;
-    player.vz = mz * player.speed * 3.1;
+    player.vx = moveX * player.speed * 3.1;
+    player.vz = moveZ * player.speed * 3.1;
   }
 
   if (justPressed.has("Space") && player.jumpsLeft > 0) {
@@ -888,8 +1019,8 @@ function updatePlayer(dt) {
     player.dashTimer -= dt;
   } else {
     const accel = player.grounded ? 22 : 11;
-    player.vx = approach(player.vx, mx * player.speed, accel * dt);
-    player.vz = approach(player.vz, mz * player.speed, accel * dt);
+    player.vx = approach(player.vx, moveX * player.speed, accel * dt);
+    player.vz = approach(player.vz, moveZ * player.speed, accel * dt);
   }
 
   player.x += player.vx * dt;
@@ -1143,6 +1274,7 @@ function updateWeapons(dt) {
   const weapons = state.player.weapons;
   if (weapons.pulse) updatePulse(dt, weapons.pulse);
   if (weapons.comet) updateComet(dt, weapons.comet);
+  if (weapons.prism) updatePrism(dt, weapons.prism);
   if (weapons.mine) updateMines(dt, weapons.mine);
   if (weapons.chain) updateChain(dt, weapons.chain);
   if (weapons.orbit) updateOrbiters(dt, weapons.orbit);
@@ -1193,6 +1325,31 @@ function updateComet(dt, level) {
     area: 5.6 * state.player.area,
     color: 0xf78f48,
   });
+}
+
+function updatePrism(dt, level) {
+  state.weaponTimers.prism = (state.weaponTimers.prism ?? 0) - dt;
+  const cooldown = Math.max(0.34, (1.18 - level * 0.04) / state.player.attackSpeed);
+  if (state.weaponTimers.prism > 0) return;
+  const target = nearestEnemy(46);
+  if (!target) return;
+  state.weaponTimers.prism = cooldown;
+
+  const shots = Math.min(8, 3 + Math.floor(level / 2) + state.player.projectileBonus);
+  const baseAngle = Math.atan2(target.z - state.player.z, target.x - state.player.x);
+  for (let i = 0; i < shots; i += 1) {
+    const spread = shots === 1 ? 0 : (i / (shots - 1) - 0.5) * 0.75;
+    fireProjectile({
+      type: "prism",
+      angle: baseAngle + spread,
+      speed: 26,
+      damage: 8 + level * 3.2,
+      radius: 0.28,
+      ttl: 0.95,
+      pierce: Math.floor(level / 3),
+      color: 0xf0fbff,
+    });
+  }
 }
 
 function updateMines(dt, level) {
@@ -1524,6 +1681,11 @@ function fireEnemyBullet(enemy, angle) {
 function damagePlayer(amount) {
   const player = state.player;
   if (player.invuln > 0 || player.dashInvuln > 0) return;
+  if (player.evasion > 0 && state.rng() < player.evasion) {
+    player.invuln = 0.25;
+    spawnBurst(player.x, player.y + 1.2, player.z, 0xc8f7ff, 8, 1.6);
+    return;
+  }
   if (player.shieldCharges > 0) {
     player.shieldCharges -= 1;
     player.invuln = 0.5;
@@ -1625,7 +1787,7 @@ function updateDrops(dt) {
     drop.mesh.rotation.y += dt * 4;
     if (dist < player.radius + 0.9) {
       if (drop.type === "coin") {
-        player.coins += drop.value;
+        player.coins += Math.max(1, Math.round(drop.value * player.coinMult));
       } else {
         addXp(drop.value * player.xpMult);
       }
@@ -1736,6 +1898,8 @@ function describeUpgrade(upgrade, rarity) {
     luck: `Rare odds and chip drops +${Math.round(10 * power)}%.`,
     shield: "Adds a recharging barrier stack.",
     thorns: `Touching enemies take ${Math.round(10 * power)} backfire damage.`,
+    evasion: `Dodge chance +${Math.round(4 * power)}%.`,
+    greed: `Chip value +${Math.round(20 * power)}%.`,
     bossBane: `Boss damage +${Math.round(18 * power)}%.`,
   };
   return `${upgrade.description} ${details[upgrade.id] || ""}`;
@@ -1796,6 +1960,12 @@ function applyUpgrade(choice) {
       case "luck":
         player.luck += 0.1 * power;
         break;
+      case "evasion":
+        player.evasion = Math.min(0.45, player.evasion + 0.04 * power);
+        break;
+      case "greed":
+        player.coinMult += 0.2 * power;
+        break;
       case "shield":
         player.shieldMax += 1;
         player.shieldCharges = player.shieldMax;
@@ -1829,9 +1999,29 @@ function updateMetaUnlocks() {
     meta.unlocks.mine = true;
     unlocked.push("Rift Mines");
   }
+  if (!meta.unlocks.orrin && state.runStats.chests >= 3) {
+    meta.unlocks.orrin = true;
+    unlocked.push("Orrin");
+  }
   if (!meta.unlocks.bossBane && state.runStats.score >= 2500) {
     meta.unlocks.bossBane = true;
     unlocked.push("Gatebreaker Ink");
+  }
+  if (!meta.unlocks.talia && state.runStats.score >= 5000) {
+    meta.unlocks.talia = true;
+    unlocked.push("Talia");
+  }
+  if (!meta.unlocks.prism && state.runStats.kills >= 300) {
+    meta.unlocks.prism = true;
+    unlocked.push("Prism Fan");
+  }
+  if (!meta.unlocks.evasion && state.runStats.elites >= 5) {
+    meta.unlocks.evasion = true;
+    unlocked.push("Smoke Frame");
+  }
+  if (!meta.unlocks.greed && state.player.coins >= 60) {
+    meta.unlocks.greed = true;
+    unlocked.push("Chip Engine");
   }
   if (unlocked.length) {
     state.runStats.unlocks.push(...unlocked);
@@ -1937,7 +2127,15 @@ function render() {
   if (state.player) {
     const player = state.player;
     const target = tmpVec.set(player.x, player.y + 1.2, player.z);
-    const desired = tmpVec2.set(player.x - 34, player.y + 48, player.z + 56);
+    cameraRig.yaw = lerpAngle(cameraRig.yaw, cameraRig.targetYaw, 0.12);
+    cameraRig.pitch = THREE.MathUtils.lerp(cameraRig.pitch, cameraRig.targetPitch, 0.12);
+    cameraRig.distance = THREE.MathUtils.lerp(cameraRig.distance, cameraRig.targetDistance, 0.12);
+    const horizontal = Math.cos(cameraRig.pitch) * cameraRig.distance;
+    const desired = tmpVec2.set(
+      player.x + Math.sin(cameraRig.yaw) * horizontal,
+      player.y + Math.sin(cameraRig.pitch) * cameraRig.distance,
+      player.z + Math.cos(cameraRig.yaw) * horizontal,
+    );
     camera.position.lerp(desired, 0.08);
     camera.lookAt(target);
   } else {
@@ -2085,6 +2283,11 @@ function approach(value, target, step) {
   return Math.max(value - step, target);
 }
 
+function lerpAngle(from, to, amount) {
+  const delta = Math.atan2(Math.sin(to - from), Math.cos(to - from));
+  return from + delta * amount;
+}
+
 function formatTime(seconds) {
   const safe = Math.max(0, Math.floor(seconds));
   const minutes = Math.floor(safe / 60);
@@ -2139,14 +2342,39 @@ function updateMenuMeta() {
       detail: "charge a shrine and open a cache",
     },
     {
+      name: "Orrin",
+      done: meta.unlocks.orrin,
+      detail: "open 3 caches in one run",
+    },
+    {
+      name: "Talia",
+      done: meta.unlocks.talia,
+      detail: "score 5000 in one run",
+    },
+    {
       name: "Rift Mines",
       done: meta.unlocks.mine,
       detail: "open 2 caches in one run",
     },
     {
+      name: "Prism Fan",
+      done: meta.unlocks.prism,
+      detail: `${Math.min(meta.bestKills, 300)}/300 kills in one run`,
+    },
+    {
       name: "Static Lasso",
       done: meta.unlocks.chain,
       detail: "activate the rift gate",
+    },
+    {
+      name: "Smoke Frame",
+      done: meta.unlocks.evasion,
+      detail: "break 5 elites in one run",
+    },
+    {
+      name: "Chip Engine",
+      done: meta.unlocks.greed,
+      detail: "hold 60 chips in one run",
     },
     {
       name: "Gatebreaker Ink",
@@ -2175,8 +2403,13 @@ function loadMeta() {
       unlocks: {
         nix: Boolean(parsed.unlocks?.nix),
         vesper: Boolean(parsed.unlocks?.vesper),
+        orrin: Boolean(parsed.unlocks?.orrin),
+        talia: Boolean(parsed.unlocks?.talia),
         mine: Boolean(parsed.unlocks?.mine),
         chain: Boolean(parsed.unlocks?.chain),
+        prism: Boolean(parsed.unlocks?.prism),
+        evasion: Boolean(parsed.unlocks?.evasion),
+        greed: Boolean(parsed.unlocks?.greed),
         bossBane: Boolean(parsed.unlocks?.bossBane),
       },
     };
@@ -2188,7 +2421,18 @@ function loadMeta() {
       bestKills: 0,
       bestTime: 0,
       bestScore: 0,
-      unlocks: { nix: false, vesper: false, mine: false, chain: false, bossBane: false },
+      unlocks: {
+        nix: false,
+        vesper: false,
+        orrin: false,
+        talia: false,
+        mine: false,
+        chain: false,
+        prism: false,
+        evasion: false,
+        greed: false,
+        bossBane: false,
+      },
     };
   }
 }
@@ -2231,6 +2475,11 @@ function renderGameToText() {
           shield: player.shieldCharges,
         }
       : null,
+    camera: {
+      yaw: Number(cameraRig.targetYaw.toFixed(2)),
+      pitch: Number(cameraRig.targetPitch.toFixed(2)),
+      distance: Number(cameraRig.targetDistance.toFixed(1)),
+    },
     counts: {
       enemies: state.enemies.length,
       projectiles: state.projectiles.length + state.enemyBullets.length + state.orbiters.length,

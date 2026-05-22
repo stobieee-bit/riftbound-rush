@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Riftbound Rush</title>
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="game"></canvas>
+      <div id="hud" class="hud hidden">
+        <div class="hud-top">
+          <div class="pill" id="run-clock">00:00</div>
+          <div class="meter hp"><span id="hp-bar"></span><b id="hp-text">100/100</b></div>
+          <div class="meter xp"><span id="xp-bar"></span><b id="xp-text">Lv 1</b></div>
+          <div class="pill" id="coins">0 chips</div>
+          <div class="pill" id="objective">Find the rift gate</div>
+        </div>
+        <div class="hud-side" id="build-list"></div>
+        <div class="toast" id="toast"></div>
+      </div>
+      <div class="panel menu" id="menu">
+        <div class="brand">Riftbound Rush</div>
+        <h1>Survive the riftstorm</h1>
+        <div class="menu-grid">
+          <div class="slot active" data-character="lume">
+            <b>Lume</b>
+            <span>Balanced runner. Starts with Pulse Bolt and extra pickup range.</span>
+          </div>
+          <div class="slot locked" data-character="nix">
+            <b>Nix</b>
+            <span>Armored brawler. Unlock: defeat 180 enemies in one run.</span>
+          </div>
+          <div class="slot locked" data-character="vesper">
+            <b>Vesper</b>
+            <span>Fast duelist. Unlock: charge a shrine and open a chest.</span>
+          </div>
+        </div>
+        <div class="meta-strip" id="menu-stats">Runs 0 - Wins 0 - Best 00:00 - Best Kills 0</div>
+        <div class="unlock-panel">
+          <div class="unlock-title">Quests & Unlocks</div>
+          <div id="unlock-list"></div>
+        </div>
+        <button id="start-btn" class="primary">Start Run</button>
+        <div class="controls">WASD move - Space jump - Shift dash - E interact - 1-3 choose upgrades - P pause - F fullscreen</div>
+      </div>
+      <div class="panel chooser hidden" id="chooser">
+        <div class="chooser-title">Choose an upgrade</div>
+        <div class="choices" id="choices"></div>
+      </div>
+      <div class="panel pause hidden" id="pause">
+        <h2>Paused</h2>
+        <button id="resume-btn" class="primary">Resume</button>
+        <button id="restart-btn">Restart Run</button>
+      </div>
+      <div class="panel result hidden" id="result">
+        <h2 id="result-title">Run Complete</h2>
+        <div id="result-stats"></div>
+        <button id="again-btn" class="primary">Run Again</button>
+      </div>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

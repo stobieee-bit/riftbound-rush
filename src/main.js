@@ -80,6 +80,9 @@ const ARENA_RADIUS = 104;
 const TILE_SIZE = 8;
 const META_KEY = "riftbound-rush-meta-v1";
 const SHRINE_CHARGE_SECONDS = 5;
+const RUN_TIME_LIMIT_SECONDS = 600;
+const MAX_GROUNDED_STEP_HEIGHT = 0.58;
+const AIR_LEDGE_CLEARANCE = 0.24;
 const CROUCH_KEYS = ["ControlLeft", "ControlRight", "KeyQ"];
 const GAME_INPUT_CODES = new Set([
   "KeyW",
@@ -604,11 +607,25 @@ function setupUi() {
     keys.delete(event.code);
   });
 
-  canvas.addEventListener("contextmenu", (event) => event.preventDefault());
+  const blockContextMenu = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    return false;
+  };
+  document.addEventListener("contextmenu", blockContextMenu, true);
+  window.addEventListener("contextmenu", blockContextMenu, true);
+  document.addEventListener(
+    "auxclick",
+    (event) => {
+      if (event.button === 2) blockContextMenu(event);
+    },
+    true,
+  );
   canvas.addEventListener("click", () => {
     if (state.mode === "playing") requestGamePointerLock();
   });
   canvas.addEventListener("pointerdown", (event) => {
+    if (event.button === 2) event.preventDefault();
     if (event.button !== 2) return;
     pointer.rotating = true;
     pointer.lastX = event.clientX;
@@ -677,6 +694,8 @@ function startRun() {
     shops: 0,
     bossSpawned: false,
     bossDefeated: false,
+    finalSwarm: false,
+    finalSwarmTime: 0,
     elites: 0,
     unlocks: [],
   };
@@ -1071,6 +1090,11 @@ function frame() {
 function update(dt) {
   if (!state.player) return;
   state.runStats.time += dt;
+  if (state.runStats.finalSwarm) {
+    state.runStats.finalSwarmTime += dt;
+  } else if (state.runStats.time >= RUN_TIME_LIMIT_SECONDS) {
+    startFinalSwarm();
+  }
   toastTimer = Math.max(0, toastTimer - dt);
   if (toastTimer <= 0) dom.toast.classList.remove("show");
 
@@ -1218,8 +1242,7 @@ function updatePlayer(dt) {
     player.vz = approach(player.vz, moveZ * player.speed * crouchSpeed, accel * dt);
   }
 
-  player.x += player.vx * dt;
-  player.z += player.vz * dt;
+  movePlayerHorizontally(dt);
   const dist = Math.hypot(player.x, player.z);
   if (dist > ARENA_RADIUS - 2) {
     const scale = (ARENA_RADIUS - 2) / dist;
@@ -1246,6 +1269,31 @@ function updatePlayer(dt) {
   }
 
   syncPlayerObject();
+}
+
+function movePlayerHorizontally(dt) {
+  const player = state.player;
+  const nextX = player.x + player.vx * dt;
+  if (canPlayerOccupy(nextX, player.z)) {
+    player.x = nextX;
+  } else {
+    player.vx = 0;
+  }
+
+  const nextZ = player.z + player.vz * dt;
+  if (canPlayerOccupy(player.x, nextZ)) {
+    player.z = nextZ;
+  } else {
+    player.vz = 0;
+  }
+}
+
+function canPlayerOccupy(x, z) {
+  const player = state.player;
+  if (!player) return true;
+  const targetFloor = groundHeight(x, z);
+  const allowedRise = player.grounded ? MAX_GROUNDED_STEP_HEIGHT : AIR_LEDGE_CLEARANCE;
+  return targetFloor <= player.y + allowedRise;
 }
 
 function syncPlayerObject() {
@@ -1375,25 +1423,51 @@ function syncShrineProgress(shrine, active) {
   shrine.progressFill.material.color.setHex(shrine.charged ? 0xf7c948 : 0x7ff7d4);
 }
 
+function startFinalSwarm() {
+  state.runStats.finalSwarm = true;
+  state.runStats.finalSwarmTime = Math.max(0, state.runStats.time - RUN_TIME_LIMIT_SECONDS);
+  state.spawnTimer = 0;
+  if (state.gate && !state.gate.active) {
+    state.gate.mesh.scale.setScalar(1.18);
+  }
+  spawnBurst(state.player.x, state.player.y + 1.4, state.player.z, 0xff5e84, 42, 7);
+  showToast("Final swarm. Waves will keep getting worse.");
+}
+
 function updateDirector(dt) {
   const time = state.runStats.time;
-  const targetEnemies = Math.min(42 + Math.floor(time / 6) * 8 + state.player.level * 4, 210);
+  const finalSwarm = state.runStats.finalSwarm;
+  const finalTime = state.runStats.finalSwarmTime;
+  const targetEnemies = finalSwarm
+    ? Math.min(145 + Math.floor(finalTime / 4) * 13 + state.player.level * 7, 360)
+    : Math.min(42 + Math.floor(time / 6) * 8 + state.player.level * 4, 210);
   state.spawnTimer -= dt;
   if (state.spawnTimer <= 0 && state.enemies.length < targetEnemies) {
-    const wave = 3 + Math.floor(time / 22) + Math.floor(state.player.level / 3);
+    const wave = finalSwarm
+      ? 11 + Math.floor(finalTime / 8) * 2 + Math.floor(state.player.level / 2)
+      : 3 + Math.floor(time / 22) + Math.floor(state.player.level / 3);
     for (let i = 0; i < wave; i += 1) {
-      spawnEnemy(chooseEnemyType(time), time);
+      spawnEnemy(chooseEnemyType(time, finalSwarm, finalTime), time);
     }
-    state.spawnTimer = Math.max(0.24, 1.18 - time * 0.005);
+    state.spawnTimer = finalSwarm
+      ? Math.max(0.08, 0.38 - finalTime * 0.002)
+      : Math.max(0.24, 1.18 - time * 0.005);
   }
 
-  if (time > 360 && !state.runStats.bossSpawned && Math.floor(time) % 9 === 0) {
+  if (!finalSwarm && time > 360 && !state.runStats.bossSpawned && Math.floor(time) % 9 === 0) {
     showToast("The riftstorm is closing. Find the gate.");
   }
 }
 
-function chooseEnemyType(time) {
+function chooseEnemyType(time, finalSwarm = false, finalTime = 0) {
   const roll = state.rng();
+  if (finalSwarm) {
+    if (roll > Math.max(0.62, 0.86 - finalTime / 220)) return "spiker";
+    if (roll < Math.min(0.34, 0.16 + finalTime / 260)) return "crasher";
+    if (roll > 0.46) return "bruiser";
+    if (roll > 0.24) return "wisp";
+    return "splinter";
+  }
   if (time > 120 && roll > 0.86) return "spiker";
   if (time > 78 && roll < 0.14) return "crasher";
   if (time > 65 && roll > 0.68) return "bruiser";
@@ -1406,16 +1480,18 @@ function spawnEnemy(typeName, time, atPoint = null) {
   const type = enemyTypes[typeName] || enemyTypes.skitter;
   const point = atPoint || spawnPointAroundPlayer();
   const scale = 1 + time / 260 + Math.max(0, state.player.level - 1) * 0.035;
+  const finalScale = state.runStats?.finalSwarm ? 1 + state.runStats.finalSwarmTime / 70 : 1;
+  const finalSpeed = state.runStats?.finalSwarm ? 1 + Math.min(state.runStats.finalSwarmTime / 260, 0.38) : 1;
   const elite = state.rng() < Math.min(0.03 + time / 7000, 0.12);
   const enemy = {
     type: typeName,
     x: point.x,
     z: point.z,
     y: groundHeight(point.x, point.z),
-    hp: type.hp * scale * (elite ? 3.1 : 1),
-    maxHp: type.hp * scale * (elite ? 3.1 : 1),
-    speed: type.speed * (elite ? 1.12 : 1),
-    damage: type.damage * (elite ? 1.35 : 1),
+    hp: type.hp * scale * finalScale * (elite ? 3.1 : 1),
+    maxHp: type.hp * scale * finalScale * (elite ? 3.1 : 1),
+    speed: type.speed * finalSpeed * (elite ? 1.12 : 1),
+    damage: type.damage * Math.sqrt(finalScale) * (elite ? 1.35 : 1),
     radius: type.radius * (elite ? 1.28 : 1),
     xp: type.xp * (elite ? 2.2 : 1),
     coins: type.coins + (elite ? 0.35 : 0),
@@ -2399,6 +2475,7 @@ function endRun(victory) {
     `Kills: ${state.runStats.kills}`,
     `Score: ${state.runStats.score}`,
     `Best Score: ${meta.bestScore}`,
+    state.runStats.finalSwarm ? `Final Swarm: ${formatTime(state.runStats.finalSwarmTime)}` : "Final Swarm: not reached",
     `Caches/Shrines/Shops: ${state.runStats.chests}/${state.runStats.shrines}/${state.runStats.shops}`,
     state.runStats.unlocks.length ? `Unlocked: ${state.runStats.unlocks.join(", ")}` : "Unlocked: none this run",
   ].join("<br>");
@@ -2482,7 +2559,7 @@ function updateHud(force = false) {
   dom.xpBar.style.width = `${xpRatio * 100}%`;
   dom.hpText.textContent = `${Math.ceil(Math.max(0, player.hp))}/${Math.ceil(player.maxHp)}`;
   dom.xpText.textContent = `Lv ${player.level}`;
-  dom.clock.textContent = formatTime(state.runStats.time);
+  dom.clock.textContent = runClockText();
   dom.coins.textContent = `${player.coins} chips`;
 
   const objective = currentObjective();
@@ -2504,8 +2581,14 @@ function currentObjective() {
   if (state.runStats?.bossDefeated) return "Rift clear";
   if (state.runStats?.bossSpawned) {
     const boss = state.enemies.find((enemy) => enemy.boss);
-    if (boss) return `Defeat Riftwarden ${Math.ceil((boss.hp / boss.maxHp) * 100)}%`;
+    if (boss) {
+      const label = `Defeat Riftwarden ${Math.ceil((boss.hp / boss.maxHp) * 100)}%`;
+      return state.runStats.finalSwarm ? `${label} - Final swarm` : label;
+    }
     return "Defeat Riftwarden";
+  }
+  if (state.runStats?.finalSwarm) {
+    return `Final swarm +${formatTime(state.runStats.finalSwarmTime)} - reach gate`;
   }
   const chest = state.chests.find((candidate) => !candidate.opened && distance2d(candidate, state.player) < candidate.radius + 0.8);
   if (chest) {
@@ -2522,6 +2605,12 @@ function currentObjective() {
     return dist < 8 ? "Press E at the rift gate" : `Find rift gate ${dist}m`;
   }
   return "Survive";
+}
+
+function runClockText() {
+  if (!state.runStats) return "00:00";
+  if (state.runStats.finalSwarm) return `F+${formatTime(state.runStats.finalSwarmTime)}`;
+  return formatTime(Math.max(0, RUN_TIME_LIMIT_SECONDS - state.runStats.time));
 }
 
 function render() {
@@ -2908,6 +2997,16 @@ function renderGameToText() {
     mode: state.mode,
     coordinateSystem: "Three.js world: x/z are horizontal arena axes, y is height, origin is arena center.",
     time: state.runStats ? Number(state.runStats.time.toFixed(1)) : 0,
+    timeLimit: RUN_TIME_LIMIT_SECONDS,
+    timeRemaining: state.runStats
+      ? Number(Math.max(0, RUN_TIME_LIMIT_SECONDS - state.runStats.time).toFixed(1))
+      : RUN_TIME_LIMIT_SECONDS,
+    finalSwarm: state.runStats
+      ? {
+          active: state.runStats.finalSwarm,
+          time: Number(state.runStats.finalSwarmTime.toFixed(1)),
+        }
+      : { active: false, time: 0 },
     objective: currentObjective(),
     selectedCharacter,
     player: player
@@ -3008,6 +3107,12 @@ window.__riftbound = {
     },
     grantCoins(amount) {
       if (state.player) state.player.coins += amount;
+    },
+    groundHeight(x, z) {
+      return groundHeight(x, z);
+    },
+    setRunTime(seconds) {
+      if (state.runStats) state.runStats.time = seconds;
     },
     teleportTo(kind) {
       if (!state.player) return false;

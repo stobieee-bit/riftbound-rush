@@ -441,6 +441,29 @@ const enemyTypes = {
     coins: 0.1,
     geometry: "tetra",
   },
+  crasher: {
+    color: 0xff6b3d,
+    hp: 24,
+    speed: 2.7,
+    damage: 18,
+    radius: 1.05,
+    xp: 10,
+    coins: 0.24,
+    geometry: "wedge",
+    charge: true,
+  },
+  spiker: {
+    color: 0x48c8ff,
+    hp: 22,
+    speed: 2.35,
+    damage: 8,
+    radius: 0.92,
+    xp: 9,
+    coins: 0.2,
+    geometry: "diamond",
+    shooter: true,
+    flying: true,
+  },
 };
 
 const state = {
@@ -875,15 +898,49 @@ function createChest(x, z, index) {
       emissiveIntensity: 0.2,
     }),
   );
+  const interior = new THREE.Mesh(
+    new THREE.BoxGeometry(2.05, 0.22, 1.24),
+    new THREE.MeshStandardMaterial({
+      color: 0x7fe7ff,
+      emissive: 0x3bd9ff,
+      emissiveIntensity: 1.2,
+      roughness: 0.18,
+      transparent: true,
+      opacity: 0.86,
+    }),
+  );
+  const emptyWell = new THREE.Mesh(
+    new THREE.BoxGeometry(2.12, 0.16, 1.34),
+    new THREE.MeshStandardMaterial({
+      color: 0x0d1b28,
+      emissive: 0x05111f,
+      emissiveIntensity: 0.28,
+      roughness: 0.72,
+    }),
+  );
   base.castShadow = true;
   lid.castShadow = true;
   base.position.y = 0.72;
+  emptyWell.position.y = 1.37;
+  interior.position.y = 1.49;
   lid.position.y = 1.58;
-  mesh.add(base, lid);
+  interior.visible = false;
+  emptyWell.visible = false;
+  mesh.add(base, emptyWell, interior, lid);
   mesh.position.set(x, y, z);
   mesh.rotation.y = (index * 0.83) % Math.PI;
   state.groups.props.add(mesh);
-  state.chests.push({ x, y, z, cost, mesh, opened: false, radius: 2.7 });
+  state.chests.push({
+    x,
+    y,
+    z,
+    cost,
+    mesh,
+    parts: { base, lid, interior, emptyWell },
+    opened: false,
+    openAmount: 0,
+    radius: 2.7,
+  });
 }
 
 function createShrine(x, z, index) {
@@ -1205,7 +1262,11 @@ function syncPlayerObject() {
 function updateWorldObjects(dt) {
   const player = state.player;
   for (const chest of state.chests) {
-    if (chest.opened) continue;
+    if (chest.opened) {
+      chest.openAmount = Math.min(1, chest.openAmount + dt * 4);
+      syncChestOpenVisual(chest);
+      continue;
+    }
     chest.mesh.rotation.y += dt * 0.55;
   }
 
@@ -1278,13 +1339,29 @@ function openChest(chest) {
   }
   state.player.coins -= chest.cost;
   chest.opened = true;
-  chest.mesh.scale.setScalar(0.72);
-  chest.mesh.position.y -= 0.25;
+  chest.openAmount = 1;
+  syncChestOpenVisual(chest);
   state.runStats.chests += 1;
   spawnBurst(chest.x, chest.y + 1.4, chest.z, 0xf7c948, 18);
   showToast(`Cache opened for ${chest.cost} chips.`);
   showUpgradeChooser("chest");
   return true;
+}
+
+function syncChestOpenVisual(chest) {
+  const { base, lid, interior, emptyWell } = chest.parts || {};
+  if (!base || !lid || !interior || !emptyWell) return;
+  const amount = THREE.MathUtils.smoothstep(THREE.MathUtils.clamp(chest.openAmount, 0, 1), 0, 1);
+  emptyWell.visible = amount > 0.04;
+  interior.visible = amount > 0.08;
+  lid.rotation.x = -1.22 * amount;
+  lid.position.y = 1.58 + amount * 0.46;
+  lid.position.z = -amount * 0.78;
+  lid.material.emissiveIntensity = 0.2 + amount * 0.38;
+  interior.scale.set(1, 0.2 + amount * 0.8, 1);
+  interior.material.opacity = 0.32 + amount * 0.54;
+  base.material.emissive.setHex(amount > 0.98 ? 0x061f2e : 0x000000);
+  base.material.emissiveIntensity = amount * 0.35;
 }
 
 function syncShrineProgress(shrine, active) {
@@ -1317,9 +1394,11 @@ function updateDirector(dt) {
 
 function chooseEnemyType(time) {
   const roll = state.rng();
-  if (time > 65 && roll > 0.78) return "bruiser";
-  if (time > 38 && roll > 0.58) return "wisp";
-  if (time > 95 && roll < 0.12) return "splinter";
+  if (time > 120 && roll > 0.86) return "spiker";
+  if (time > 78 && roll < 0.14) return "crasher";
+  if (time > 65 && roll > 0.68) return "bruiser";
+  if (time > 38 && roll > 0.46) return "wisp";
+  if (time > 95 && roll < 0.28) return "splinter";
   return "skitter";
 }
 
@@ -1341,6 +1420,11 @@ function spawnEnemy(typeName, time, atPoint = null) {
     xp: type.xp * (elite ? 2.2 : 1),
     coins: type.coins + (elite ? 0.35 : 0),
     hitTimer: 0,
+    aiTimer: type.shooter ? 0.9 + state.rng() * 0.7 : 0,
+    chargeTimer: 0,
+    chargeCooldown: type.charge ? 0.8 + state.rng() * 0.9 : 0,
+    chargeX: 0,
+    chargeZ: 0,
     elite,
     boss: false,
   };
@@ -1355,6 +1439,8 @@ function makeEnemyMesh(type, enemy) {
   if (type.geometry === "box") geometry = new THREE.BoxGeometry(1.8, 1.8, 1.8);
   else if (type.geometry === "sphere") geometry = new THREE.OctahedronGeometry(1.1, 0);
   else if (type.geometry === "tetra") geometry = new THREE.TetrahedronGeometry(1.0, 0);
+  else if (type.geometry === "wedge") geometry = new THREE.ConeGeometry(1.05, 2.25, 4);
+  else if (type.geometry === "diamond") geometry = new THREE.OctahedronGeometry(1.15, 0);
   else geometry = new THREE.ConeGeometry(1.0, 1.9, 6);
 
   const material = new THREE.MeshStandardMaterial({
@@ -1757,15 +1843,17 @@ function updateEnemies(dt) {
 
     if (enemy.boss) {
       updateBoss(enemy, dt);
+    } else if (enemyTypes[enemy.type]?.charge) {
+      updateChargingEnemy(enemy, dt);
+    } else if (enemyTypes[enemy.type]?.shooter) {
+      updateShooterEnemy(enemy, dt);
     } else {
       const dx = player.x - enemy.x;
       const dz = player.z - enemy.z;
       const len = Math.max(Math.hypot(dx, dz), 0.001);
       enemy.x += (dx / len) * enemy.speed * dt;
       enemy.z += (dz / len) * enemy.speed * dt;
-      enemy.y = groundHeight(enemy.x, enemy.z);
-      enemy.mesh.position.set(enemy.x, enemy.y + enemy.radius + (enemyTypes[enemy.type]?.flying ? 1.2 : 0), enemy.z);
-      enemy.mesh.rotation.y += dt * (enemy.elite ? 2.5 : 1.5);
+      syncEnemyMesh(enemy, dt);
     }
 
     if (distance2d(enemy, player) < enemy.radius + player.radius) {
@@ -1775,6 +1863,83 @@ function updateEnemies(dt) {
       }
     }
   }
+}
+
+function updateChargingEnemy(enemy, dt) {
+  const player = state.player;
+  const dx = player.x - enemy.x;
+  const dz = player.z - enemy.z;
+  const len = Math.max(Math.hypot(dx, dz), 0.001);
+  enemy.chargeCooldown = Math.max(0, enemy.chargeCooldown - dt);
+
+  if (enemy.chargeTimer <= 0 && enemy.chargeCooldown <= 0 && len < 34) {
+    enemy.chargeTimer = 0.58;
+    enemy.chargeCooldown = 2.35 + state.rng() * 0.7;
+    enemy.chargeX = dx / len;
+    enemy.chargeZ = dz / len;
+    spawnBurst(enemy.x, enemy.y + 1.2, enemy.z, enemyTypes[enemy.type].color, 5, 1.4);
+  }
+
+  if (enemy.chargeTimer > 0) {
+    enemy.chargeTimer -= dt;
+    enemy.x += enemy.chargeX * enemy.speed * 3.15 * dt;
+    enemy.z += enemy.chargeZ * enemy.speed * 3.15 * dt;
+    enemy.mesh.scale.setScalar(enemy.radius * (1.08 + Math.sin(enemy.chargeTimer * 28) * 0.04));
+  } else {
+    enemy.x += (dx / len) * enemy.speed * dt;
+    enemy.z += (dz / len) * enemy.speed * dt;
+    enemy.mesh.scale.setScalar(enemy.radius);
+  }
+
+  syncEnemyMesh(enemy, dt, enemy.chargeTimer > 0 ? 4.5 : 2.0);
+}
+
+function updateShooterEnemy(enemy, dt) {
+  const player = state.player;
+  const dx = player.x - enemy.x;
+  const dz = player.z - enemy.z;
+  const distance = Math.max(Math.hypot(dx, dz), 0.001);
+  const dirX = dx / distance;
+  const dirZ = dz / distance;
+  const orbitX = -dirZ;
+  const orbitZ = dirX;
+  const desiredDistance = 32;
+  let moveX = 0;
+  let moveZ = 0;
+
+  if (distance > desiredDistance + 7) {
+    moveX += dirX;
+    moveZ += dirZ;
+  } else if (distance < desiredDistance - 8) {
+    moveX -= dirX;
+    moveZ -= dirZ;
+  }
+  moveX += orbitX * 0.42;
+  moveZ += orbitZ * 0.42;
+  const moveLen = Math.max(Math.hypot(moveX, moveZ), 0.001);
+  enemy.x += (moveX / moveLen) * enemy.speed * dt;
+  enemy.z += (moveZ / moveLen) * enemy.speed * dt;
+
+  enemy.aiTimer -= dt;
+  if (enemy.aiTimer <= 0 && distance < 48) {
+    enemy.aiTimer = Math.max(0.95, 1.85 - state.runStats.time / 420) + state.rng() * 0.45;
+    fireEnemyBullet(enemy, Math.atan2(dz, dx), {
+      color: 0x7fe7ff,
+      speed: 12.8,
+      damage: enemy.damage,
+      radius: 0.48,
+      ttl: 3.6,
+    });
+  }
+
+  syncEnemyMesh(enemy, dt, 2.4);
+}
+
+function syncEnemyMesh(enemy, dt, turnSpeed = 1.5) {
+  const type = enemyTypes[enemy.type] || enemyTypes.skitter;
+  enemy.y = groundHeight(enemy.x, enemy.z);
+  enemy.mesh.position.set(enemy.x, enemy.y + enemy.radius + (type.flying ? 1.2 : 0), enemy.z);
+  enemy.mesh.rotation.y += dt * (enemy.elite ? turnSpeed + 1 : turnSpeed);
 }
 
 function updateBoss(enemy, dt) {
@@ -1812,12 +1977,14 @@ function updateBoss(enemy, dt) {
   }
 }
 
-function fireEnemyBullet(enemy, angle) {
+function fireEnemyBullet(enemy, angle, options = {}) {
+  const color = options.color || 0xff5e84;
+  const radius = options.radius || 0.55;
   const mesh = new THREE.Mesh(
-    new THREE.SphereGeometry(0.55, 8, 8),
+    new THREE.SphereGeometry(radius, 8, 8),
     new THREE.MeshStandardMaterial({
-      color: 0xff5e84,
-      emissive: 0xff1d58,
+      color,
+      emissive: color,
       emissiveIntensity: 0.75,
     }),
   );
@@ -1825,11 +1992,11 @@ function fireEnemyBullet(enemy, angle) {
     x: enemy.x,
     y: enemy.y + 1.2,
     z: enemy.z,
-    vx: Math.cos(angle) * 10.5,
-    vz: Math.sin(angle) * 10.5,
-    radius: 0.62,
-    damage: 13,
-    ttl: 4.5,
+    vx: Math.cos(angle) * (options.speed || 10.5),
+    vz: Math.sin(angle) * (options.speed || 10.5),
+    radius: radius + 0.07,
+    damage: options.damage || 13,
+    ttl: options.ttl || 4.5,
     mesh,
   };
   mesh.position.set(bullet.x, bullet.y, bullet.z);
@@ -1980,11 +2147,26 @@ function showUpgradeChooser(source) {
   state.currentChoices.forEach((choice, index) => {
     const button = document.createElement("button");
     button.className = `choice ${choice.rarity}`;
-    button.innerHTML = `<small>${index + 1} - ${rarityLabel[choice.rarity]} ${typeLabel(choice.type)}</small><b>${choice.name}</b><span>${choice.description}</span>`;
+    button.innerHTML = renderChoiceCard(choice, index);
     button.addEventListener("click", () => chooseUpgrade(index));
     dom.choices.append(button);
   });
   dom.chooser.classList.remove("hidden");
+}
+
+function renderChoiceCard(choice, index) {
+  const current = state.player.upgrades[choice.id] || 0;
+  const amount = choice.type === "weapon" && rarityPower[choice.rarity] >= 2 ? 2 : 1;
+  const next = Math.min(choice.max, current + amount);
+  const currentLabel = current > 0 ? roman(current) : "New";
+  const nextLabel = roman(next);
+  return [
+    `<small>${index + 1} - ${rarityLabel[choice.rarity]} ${typeLabel(choice.type)}</small>`,
+    `<b>${choice.name}</b>`,
+    `<div class="choice-level">${currentLabel} to ${nextLabel}</div>`,
+    `<span>${choice.description}</span>`,
+    `<em>Press ${index + 1} or click to pick</em>`,
+  ].join("");
 }
 
 function chooseUpgrade(index) {

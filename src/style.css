@@ -369,8 +369,11 @@ h2 {
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 8px;
   cursor: pointer;
-  min-height: 160px;
+  display: flex;
+  flex-direction: column;
+  min-height: 188px;
   padding: 14px;
+  text-align: left;
 }
 
 .choice.common {
@@ -406,8 +409,33 @@ h2 {
 .choice span {
   color: #d6e3ea;
   display: block;
+  flex: 1;
   font-size: 13px;
   line-height: 1.35;
+}
+
+.choice-level {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  color: #f6fbff;
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1;
+  margin: 0 0 10px;
+  padding: 6px 8px;
+  width: fit-content;
+}
+
+.choice em {
+  color: #9fb4c2;
+  display: block;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 900;
+  margin-top: 12px;
+  text-transform: uppercase;
 }
 
 .pause,

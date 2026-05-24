@@ -748,6 +748,12 @@ function startRun() {
     finalSwarm: false,
     finalSwarmTime: 0,
     elites: 0,
+    evolutions: {
+      pulse: 0,
+      prism: 0,
+      skyLance: 0,
+      driftSaw: 0,
+    },
     unlocks: [],
   };
 
@@ -801,6 +807,7 @@ function startRun() {
     maxJumps: 1,
     jumpsLeft: 1,
     grounded: true,
+    airTime: 0,
     shieldCharges: 0,
     shieldMax: 0,
     shieldTimer: 0,
@@ -1215,6 +1222,8 @@ function resetCamera() {
 
 function updatePlayer(dt) {
   const player = state.player;
+  const wasGrounded = player.grounded;
+  const previousAirTime = player.airTime;
   let mx = 0;
   let mz = 0;
   if (keys.has("KeyW")) mz += 1;
@@ -1340,8 +1349,13 @@ function updatePlayer(dt) {
     player.vy = 0;
     player.grounded = true;
     player.jumpsLeft = player.maxJumps;
+    if (!wasGrounded && previousAirTime > 0.18) {
+      handlePlayerLanding(previousAirTime);
+    }
+    player.airTime = 0;
   } else {
     player.grounded = false;
+    player.airTime = previousAirTime + dt;
   }
 
   if (player.regen > 0) {
@@ -1349,6 +1363,26 @@ function updatePlayer(dt) {
   }
 
   syncPlayerObject();
+}
+
+function handlePlayerLanding(airTime) {
+  const level = state.player.weapons.skyLance || 0;
+  if (level < 5 || (state.weaponTimers.skyLanceLanding ?? 0) > 0) return;
+  state.weaponTimers.skyLanceLanding = 1.15;
+  const count = Math.min(10, 4 + Math.floor(level / 2) + Math.min(2, state.player.projectileBonus));
+  const damage = (11 + level * 3.6) * Math.min(1.45, 1 + airTime * 0.35);
+  fireRadialProjectiles({
+    type: "skyLance",
+    count,
+    speed: 34,
+    damage,
+    radius: 0.32,
+    ttl: 1.05,
+    pierce: 1 + Math.floor(level / 4),
+    color: 0xb7f7ff,
+  });
+  state.runStats.evolutions.skyLance += 1;
+  spawnBurst(state.player.x, state.player.y + 0.5, state.player.z, 0xb7f7ff, 14, 3.2);
 }
 
 function movePlayerHorizontally(dt) {
@@ -1678,6 +1712,7 @@ function spawnBoss() {
 }
 
 function updateWeapons(dt) {
+  state.weaponTimers.skyLanceLanding = Math.max(0, (state.weaponTimers.skyLanceLanding ?? 0) - dt);
   const weapons = state.player.weapons;
   if (weapons.pulse) updatePulse(dt, weapons.pulse);
   if (weapons.comet) updateComet(dt, weapons.comet);
@@ -1711,6 +1746,7 @@ function updatePulse(dt, level) {
       ttl: 1.8,
       pierce: 1 + Math.floor(level / 4),
       color: 0x66e4ff,
+      evolved: level >= 7,
     });
   }
 }
@@ -1744,10 +1780,11 @@ function updatePrism(dt, level) {
   if (!target) return;
   state.weaponTimers.prism = cooldown;
 
-  const shots = Math.min(8, 3 + Math.floor(level / 2) + state.player.projectileBonus);
+  const evolved = level >= 6;
+  const shots = Math.min(evolved ? 11 : 8, 3 + Math.floor(level / 2) + state.player.projectileBonus + (evolved ? 1 : 0));
   const baseAngle = Math.atan2(target.z - state.player.z, target.x - state.player.x);
   for (let i = 0; i < shots; i += 1) {
-    const spread = shots === 1 ? 0 : (i / (shots - 1) - 0.5) * 0.75;
+    const spread = shots === 1 ? 0 : (i / (shots - 1) - 0.5) * (evolved ? 1.05 : 0.75);
     fireProjectile({
       type: "prism",
       angle: baseAngle + spread,
@@ -1757,6 +1794,7 @@ function updatePrism(dt, level) {
       ttl: 0.95,
       pierce: Math.floor(level / 3),
       color: 0xf0fbff,
+      evolved,
     });
   }
 }
@@ -1812,6 +1850,7 @@ function updateDriftSaw(dt, level) {
       ttl: sliding ? 1.45 : 1.2,
       pierce: 1 + Math.floor(level / 3) + (sliding ? 1 : 0),
       color: 0xffd36b,
+      evolved: level >= 6,
     });
   }
 }
@@ -1932,18 +1971,23 @@ function fireProjectile(config) {
   });
   const mesh = new THREE.Mesh(geometry, material);
   mesh.castShadow = true;
+  const originX = config.x ?? player.x;
+  const originY = config.y ?? player.y + 1.35;
+  const originZ = config.z ?? player.z;
   const projectile = {
     type: config.type,
-    x: player.x,
-    y: player.y + 1.35,
-    z: player.z,
+    x: originX,
+    y: originY,
+    z: originZ,
     vx: Math.cos(config.angle) * config.speed,
     vz: Math.sin(config.angle) * config.speed,
+    angle: config.angle,
     damage: config.damage,
     radius: config.radius,
     ttl: config.ttl,
     pierce: config.pierce,
     area: config.area || 0,
+    evolved: Boolean(config.evolved),
     mesh,
     hit: new Set(),
   };
@@ -1952,6 +1996,20 @@ function fireProjectile(config) {
   mesh.position.set(projectile.x, projectile.y, projectile.z);
   state.groups.projectiles.add(mesh);
   state.projectiles.push(projectile);
+}
+
+function fireRadialProjectiles(config) {
+  const count = Math.max(1, config.count);
+  const offset = state.rng() * Math.PI * 2;
+  for (let i = 0; i < count; i += 1) {
+    fireProjectile({
+      ...config,
+      angle: offset + (i / count) * Math.PI * 2,
+      x: state.player.x,
+      y: state.player.y + 1.05,
+      z: state.player.z,
+    });
+  }
 }
 
 function projectileGeometry(config) {
@@ -2003,6 +2061,7 @@ function updateProjectiles(dt) {
           consumed = true;
         } else {
           dealDamage(enemy, projectile.damage, projectile.type);
+          triggerProjectileEvolution(projectile, enemy);
           projectile.pierce -= 1;
           consumed = projectile.pierce < 0;
         }
@@ -2030,6 +2089,52 @@ function updateProjectiles(dt) {
     if (bullet.ttl <= 0 || Math.hypot(bullet.x, bullet.z) > ARENA_RADIUS + 20) {
       removeEnemyBullet(i);
     }
+  }
+}
+
+function triggerProjectileEvolution(projectile, enemy) {
+  if (!projectile.evolved) return;
+  if (projectile.type === "pulse") {
+    const next = nearestEnemyTo(enemy, 16 * state.player.area, new Set([enemy]));
+    if (!next) return;
+    createBeam(enemy, next, 0x66e4ff);
+    dealDamage(next, projectile.damage * 0.46, "pulse");
+    state.runStats.evolutions.pulse += 1;
+  } else if (projectile.type === "prism" && projectile.hit.size === 1) {
+    const base = projectile.angle + Math.PI;
+    for (const offset of [-0.42, 0.42]) {
+      fireProjectile({
+        type: "prismEcho",
+        angle: base + offset,
+        x: enemy.x,
+        y: enemy.y + 1.1,
+        z: enemy.z,
+        speed: 22,
+        damage: projectile.damage * 0.48,
+        radius: Math.max(0.18, projectile.radius * 0.72),
+        ttl: 0.58,
+        pierce: 0,
+        color: 0xf0fbff,
+      });
+    }
+    state.runStats.evolutions.prism += 1;
+  } else if (projectile.type === "driftSaw" && projectile.hit.size === 2) {
+    for (const offset of [-0.72, 0.72]) {
+      fireProjectile({
+        type: "driftSaw",
+        angle: projectile.angle + offset,
+        x: enemy.x,
+        y: enemy.y + 1,
+        z: enemy.z,
+        speed: 28,
+        damage: projectile.damage * 0.52,
+        radius: Math.max(0.24, projectile.radius * 0.7),
+        ttl: 0.72,
+        pierce: 0,
+        color: 0xffd36b,
+      });
+    }
+    state.runStats.evolutions.driftSaw += 1;
   }
 }
 
@@ -2393,13 +2498,26 @@ function renderChoiceCard(choice, index) {
   const next = Math.min(choice.max, current + amount);
   const currentLabel = current > 0 ? roman(current) : "New";
   const nextLabel = roman(next);
+  const evolution = weaponEvolutionHint(choice.id, next);
   return [
     `<small>${index + 1} - ${rarityLabel[choice.rarity]} ${typeLabel(choice.type)}</small>`,
     `<b>${choice.name}</b>`,
     `<div class="choice-level">${currentLabel} to ${nextLabel}</div>`,
     `<span>${choice.description}</span>`,
+    evolution ? `<span class="choice-evolution">${evolution}</span>` : "",
     `<em>Press ${index + 1} or click to pick</em>`,
   ].join("");
+}
+
+function weaponEvolutionHint(id, nextLevel) {
+  if (nextLevel < 6 && !(id === "skyLance" && nextLevel >= 5)) return "";
+  const hints = {
+    pulse: "Overcharged: bolts arc to a second enemy.",
+    prism: "Echo fan: shards split after their first hit.",
+    driftSaw: "Ripsaw: wheels split after cutting through targets.",
+    skyLance: "Groundfall: landing throws lances outward.",
+  };
+  return hints[id] || "";
 }
 
 function chooseUpgrade(index) {
@@ -2427,16 +2545,83 @@ function rollUpgradeChoices(source) {
   let guard = 80;
   while (chosen.length < 3 && guard > 0 && available.length) {
     guard -= 1;
-    const upgrade = available[Math.floor(state.rng() * available.length)];
-    if (chosen.some((choice) => choice.id === upgrade.id)) continue;
+    const pool = available.filter((upgrade) => !chosen.some((choice) => choice.id === upgrade.id));
+    if (!pool.length) break;
+    const upgrade = pickWeightedUpgrade(pool, source);
     const rarity = rollRarity(source);
     chosen.push({
       ...upgrade,
       rarity,
+      offerWeight: upgradeOfferWeight(upgrade, source),
       description: describeUpgrade(upgrade, rarity),
     });
   }
   return chosen;
+}
+
+function pickWeightedUpgrade(pool, source) {
+  const weighted = pool.map((upgrade) => ({
+    upgrade,
+    weight: upgradeOfferWeight(upgrade, source),
+  }));
+  const total = weighted.reduce((sum, entry) => sum + entry.weight, 0);
+  let roll = state.rng() * total;
+  for (const entry of weighted) {
+    roll -= entry.weight;
+    if (roll <= 0) return entry.upgrade;
+  }
+  return weighted[weighted.length - 1].upgrade;
+}
+
+function upgradeOfferWeight(upgrade, source) {
+  const player = state.player;
+  const run = state.runStats;
+  const tags = new Set(upgrade.tags || []);
+  const current = player.upgrades[upgrade.id] || 0;
+  let weight = 1;
+
+  if (current > 0) weight += 0.45 + Math.min(current, 6) * 0.08;
+  if (upgrade.type === "weapon" && current === 0 && Object.keys(player.weapons).length >= 4) weight *= 0.68;
+
+  if (source === "chest") {
+    if (upgrade.type === "weapon") weight += 0.35;
+    if (tags.has("loot")) weight += 0.2;
+  } else if (source === "shop") {
+    if (current > 0) weight += 0.35;
+    if (tags.has("loot") || tags.has("damage")) weight += 0.25;
+  } else if (source === "shrine") {
+    if (tags.has("utility") || tags.has("luck")) weight += 0.65;
+    if (upgrade.id === "attune" || upgrade.id === "votive") weight += 0.75;
+  }
+
+  if (run.jumps >= 6 || player.maxJumps > 1) {
+    if (upgrade.id === "skyLance" || upgrade.id === "jump") weight += 0.9;
+    if (tags.has("movement")) weight += 0.32;
+  }
+  if (run.slides >= 2) {
+    if (upgrade.id === "driftSaw" || upgrade.id === "dash" || upgrade.id === "speed") weight += 0.85;
+    if (tags.has("movement")) weight += 0.28;
+  }
+  if (run.shrines > 0) {
+    if (upgrade.id === "attune" || upgrade.id === "votive" || upgrade.id === "luck") weight += 0.72;
+    if (tags.has("utility")) weight += 0.25;
+  }
+  if (run.chipsSpent >= 20 || player.coins >= 24) {
+    if (upgrade.id === "market" || upgrade.id === "greed" || upgrade.id === "luck") weight += 0.75;
+    if (tags.has("loot")) weight += 0.3;
+  }
+  if (run.finalSwarm || run.time > RUN_TIME_LIMIT_SECONDS - 90 || run.bossSpawned) {
+    if (upgrade.id === "dawnAnchor" || upgrade.id === "bossBane") weight += 0.85;
+    if (tags.has("defense")) weight += 0.45;
+  }
+
+  if (player.weapons.skyLance && (upgrade.id === "jump" || upgrade.id === "projectile" || upgrade.id === "damage")) weight += 0.42;
+  if (player.weapons.driftSaw && (upgrade.id === "speed" || upgrade.id === "dash" || upgrade.id === "area")) weight += 0.42;
+  if (player.weapons.prism && (upgrade.id === "projectile" || upgrade.id === "haste")) weight += 0.36;
+  if ((player.weapons.comet || player.weapons.mine) && (upgrade.id === "area" || upgrade.id === "damage")) weight += 0.36;
+  if (player.weapons.pulse && (upgrade.id === "projectile" || upgrade.id === "crit")) weight += 0.26;
+
+  return THREE.MathUtils.clamp(weight, 0.35, 4.5);
 }
 
 function rollRarity(source) {
@@ -3304,6 +3489,7 @@ function renderGameToText() {
           shrines: state.runStats.shrines,
           chests: state.runStats.chests,
           shops: state.runStats.shops,
+          evolutions: state.runStats.evolutions,
         }
       : null,
     enemies: state.enemies.slice(0, 12).map((enemy) => ({
@@ -3350,6 +3536,7 @@ function renderGameToText() {
       id: choice.id,
       name: choice.name,
       rarity: choice.rarity,
+      offerWeight: Number((choice.offerWeight || 1).toFixed(2)),
     })),
     meta: state.meta,
   };
@@ -3381,6 +3568,19 @@ window.__riftbound = {
     },
     setRunTime(seconds) {
       if (state.runStats) state.runStats.time = seconds;
+    },
+    previewChoices(source = "level") {
+      if (state.mode !== "playing") return [];
+      return rollUpgradeChoices(source).map((choice) => ({
+        id: choice.id,
+        rarity: choice.rarity,
+        offerWeight: Number((choice.offerWeight || 1).toFixed(2)),
+      }));
+    },
+    spawnEnemy(type = "skitter", x = state.player?.x + 12, z = state.player?.z) {
+      if (state.mode !== "playing" || !state.player) return false;
+      spawnEnemy(type, state.runStats?.time || 0, { x, z });
+      return true;
     },
     teleportTo(kind) {
       if (!state.player) return false;

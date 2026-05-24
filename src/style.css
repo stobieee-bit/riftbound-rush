@@ -414,6 +414,14 @@ h2 {
   line-height: 1.35;
 }
 
+.choice span.choice-evolution {
+  color: #f7c948;
+  flex: 0;
+  font-size: 12px;
+  font-weight: 900;
+  margin-top: 8px;
+}
+
 .choice-level {
   background: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.12);

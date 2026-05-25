@@ -21,6 +21,7 @@ const tmpVec = new THREE.Vector3();
 const tmpVec2 = new THREE.Vector3();
 const tmpMat = new THREE.Matrix4();
 const tmpColor = new THREE.Color();
+const tmpColor2 = new THREE.Color();
 
 const dom = {
   hud: document.querySelector("#hud"),
@@ -49,6 +50,7 @@ const dom = {
   unlockList: document.querySelector("#unlock-list"),
   buildList: document.querySelector("#build-list"),
   toast: document.querySelector("#toast"),
+  flash: document.querySelector("#screen-flash"),
 };
 
 const keys = new Set();
@@ -75,6 +77,59 @@ const DEFAULT_CAMERA = {
   pitch: 0.62,
   distance: 82,
 };
+
+const SPRINT_50_COMPLETED = [
+  "favicon",
+  "theme-color",
+  "screen-flash",
+  "low-health-hud",
+  "final-swarm-hud",
+  "toast-severity",
+  "choice-hover",
+  "choice-synergy-hints",
+  "world-cost-labels",
+  "affordability-label-colors",
+  "discount-labels",
+  "opened-cache-labels",
+  "shop-sold-labels",
+  "shrine-progress-labels",
+  "gate-distance-label",
+  "floating-damage-text",
+  "floating-crit-text",
+  "floating-chip-text",
+  "floating-xp-text",
+  "level-up-feedback",
+  "pickup-sounds",
+  "chest-sounds",
+  "shrine-sounds",
+  "upgrade-sounds",
+  "hurt-sounds",
+  "final-swarm-sound",
+  "camera-shake",
+  "enemy-hit-nudge",
+  "enemy-elite-rings",
+  "enemy-hp-tint",
+  "new-leaper-enemy",
+  "leaper-telegraph",
+  "new-bulwark-enemy",
+  "enemy-selection-variety",
+  "final-swarm-variety",
+  "boss-gate-feedback",
+  "cache-open-feedback",
+  "shop-buy-feedback",
+  "shrine-reward-feedback",
+  "stat-tracking-expanded",
+  "run-result-expanded",
+  "hud-build-priority",
+  "objective-cost-discount",
+  "debug-grant-upgrade",
+  "debug-sprint-summary",
+  "debug-spawn-wave",
+  "render-label-counts",
+  "render-damage-stats",
+  "progress-documentation",
+  "verification-smoke",
+];
 
 const ARENA_RADIUS = 104;
 const TILE_SIZE = 8;
@@ -514,6 +569,27 @@ const enemyTypes = {
     shooter: true,
     flying: true,
   },
+  leaper: {
+    color: 0xff5e84,
+    hp: 28,
+    speed: 2.85,
+    damage: 16,
+    radius: 0.96,
+    xp: 12,
+    coins: 0.42,
+    geometry: "leaper",
+    leap: true,
+  },
+  bulwark: {
+    color: 0x8fa4af,
+    hp: 76,
+    speed: 1.72,
+    damage: 19,
+    radius: 1.58,
+    xp: 18,
+    coins: 0.66,
+    geometry: "shield",
+  },
 };
 
 const state = {
@@ -530,6 +606,8 @@ const state = {
   enemyBullets: [],
   projectiles: [],
   drops: [],
+  labels: [],
+  floaters: [],
   chests: [],
   shrines: [],
   shops: [],
@@ -539,6 +617,12 @@ const state = {
   currentChoices: [],
   choiceSource: "level",
   weaponTimers: {},
+  audio: {
+    ctx: null,
+    enabled: false,
+  },
+  flashTimer: 0,
+  shake: 0,
   spawnTimer: 0,
   spawnBudget: 0,
   runStats: null,
@@ -580,6 +664,7 @@ function setupScene() {
   state.groups.enemies = new THREE.Group();
   state.groups.projectiles = new THREE.Group();
   state.groups.drops = new THREE.Group();
+  state.groups.labels = new THREE.Group();
   state.groups.effects = new THREE.Group();
   scene.add(
     state.groups.terrain,
@@ -587,6 +672,7 @@ function setupScene() {
     state.groups.enemies,
     state.groups.projectiles,
     state.groups.drops,
+    state.groups.labels,
     state.groups.effects,
   );
 }
@@ -713,6 +799,7 @@ function setupUi() {
 }
 
 function startRun() {
+  ensureAudio();
   clearWorld();
   state.seed = Math.floor(Math.random() * 1_000_000_000);
   state.rng = createRng(state.seed);
@@ -726,6 +813,8 @@ function startRun() {
   state.enemyBullets = [];
   state.projectiles = [];
   state.drops = [];
+  state.labels = [];
+  state.floaters = [];
   state.chests = [];
   state.shrines = [];
   state.shops = [];
@@ -743,6 +832,13 @@ function startRun() {
     slides: 0,
     chipsEarned: 0,
     chipsSpent: 0,
+    pickups: 0,
+    damageDealt: 0,
+    damageTaken: 0,
+    crits: 0,
+    dodges: 0,
+    shieldBlocks: 0,
+    levelUps: 0,
     bossSpawned: false,
     bossDefeated: false,
     finalSwarm: false,
@@ -829,10 +925,13 @@ function startRun() {
   scatterWorldObjects();
   dom.menu.classList.add("hidden");
   dom.hud.classList.remove("hidden");
+  dom.hud.classList.remove("low-health", "final-swarm");
+  if (dom.flash) dom.flash.className = "screen-flash";
   dom.pause.classList.add("hidden");
   dom.result.classList.add("hidden");
   dom.chooser.classList.add("hidden");
   showToast(`${def.name} enters the rift.`);
+  playTone("start");
   updateHud(true);
   requestGamePointerLock();
 }
@@ -844,8 +943,12 @@ function clearWorld() {
       child.traverse?.((node) => {
         node.geometry?.dispose?.();
         if (Array.isArray(node.material)) {
-          node.material.forEach((material) => material.dispose?.());
+          node.material.forEach((material) => {
+            material.map?.dispose?.();
+            material.dispose?.();
+          });
         } else {
+          node.material?.map?.dispose?.();
           node.material?.dispose?.();
         }
       });
@@ -982,6 +1085,71 @@ function spendChips(baseCost) {
   return { ok: true, cost };
 }
 
+function createWorldLabel(text, color = "#f6fbff", scale = 5.4) {
+  const sprite = new THREE.Sprite(
+    new THREE.SpriteMaterial({
+      map: makeLabelTexture(text, color),
+      transparent: true,
+      depthWrite: false,
+      depthTest: false,
+    }),
+  );
+  sprite.renderOrder = 20;
+  sprite.scale.set(scale, scale * 0.28, 1);
+  sprite.userData.text = text;
+  sprite.userData.color = color;
+  sprite.userData.baseScale = scale;
+  state.groups.labels.add(sprite);
+  state.labels.push(sprite);
+  return sprite;
+}
+
+function makeLabelTexture(text, color = "#f6fbff") {
+  const labelCanvas = document.createElement("canvas");
+  labelCanvas.width = 256;
+  labelCanvas.height = 64;
+  const context = labelCanvas.getContext("2d");
+  context.clearRect(0, 0, labelCanvas.width, labelCanvas.height);
+  context.fillStyle = "rgba(5, 13, 21, 0.82)";
+  roundRect(context, 8, 10, 240, 44, 10);
+  context.fill();
+  context.strokeStyle = color;
+  context.lineWidth = 3;
+  context.stroke();
+  context.fillStyle = color;
+  context.font = "900 24px Inter, Arial, sans-serif";
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  context.fillText(String(text).toUpperCase(), 128, 32, 222);
+  const texture = new THREE.CanvasTexture(labelCanvas);
+  texture.minFilter = THREE.LinearFilter;
+  return texture;
+}
+
+function updateWorldLabel(sprite, text, color = "#f6fbff") {
+  if (!sprite) return;
+  if (sprite.userData.text === text && sprite.userData.color === color) return;
+  sprite.material.map?.dispose?.();
+  sprite.material.map = makeLabelTexture(text, color);
+  sprite.material.needsUpdate = true;
+  sprite.userData.text = text;
+  sprite.userData.color = color;
+}
+
+function roundRect(context, x, y, width, height, radius) {
+  context.beginPath();
+  context.moveTo(x + radius, y);
+  context.lineTo(x + width - radius, y);
+  context.quadraticCurveTo(x + width, y, x + width, y + radius);
+  context.lineTo(x + width, y + height - radius);
+  context.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+  context.lineTo(x + radius, y + height);
+  context.quadraticCurveTo(x, y + height, x, y + height - radius);
+  context.lineTo(x, y + radius);
+  context.quadraticCurveTo(x, y, x + radius, y);
+  context.closePath();
+}
+
 function createChest(x, z, index) {
   const y = groundHeight(x, z);
   const cost = chestCostForIndex(index);
@@ -1034,12 +1202,15 @@ function createChest(x, z, index) {
   mesh.position.set(x, y, z);
   mesh.rotation.y = (index * 0.83) % Math.PI;
   state.groups.props.add(mesh);
+  const label = createWorldLabel(`${cost} chips`, "#f7c948", 5.6);
+  label.position.set(x, y + 3.05, z);
   state.chests.push({
     x,
     y,
     z,
     cost,
     mesh,
+    label,
     parts: { base, lid, interior, emptyWell },
     opened: false,
     openAmount: 0,
@@ -1075,6 +1246,8 @@ function createShrine(x, z, index) {
   group.position.set(x, y, z);
   group.rotation.y = index * 1.1;
   state.groups.props.add(group);
+  const label = createWorldLabel("Shrine", "#7ff7d4", 5.3);
+  label.position.set(x, y + 5.25, z);
 
   const progress = new THREE.Group();
   const progressBack = new THREE.Mesh(
@@ -1097,6 +1270,7 @@ function createShrine(x, z, index) {
     y,
     z,
     mesh: group,
+    label,
     progress,
     progressFill,
     radius: 5,
@@ -1130,7 +1304,10 @@ function createShop(x, z, index) {
   group.position.set(x, y, z);
   group.rotation.y = index * 0.72;
   state.groups.props.add(group);
-  state.shops.push({ x, y, z, mesh: group, radius: 3.8, cost: shopCostForIndex(index), bought: false });
+  const cost = shopCostForIndex(index);
+  const label = createWorldLabel(`${cost} chips`, "#ffb38a", 5.6);
+  label.position.set(x, y + 3.2, z);
+  state.shops.push({ x, y, z, mesh: group, label, radius: 3.8, cost, bought: false });
 }
 
 function createBossGate(x, z) {
@@ -1160,7 +1337,9 @@ function createBossGate(x, z) {
   group.position.set(x, y, z);
   group.rotation.y = state.rng() * Math.PI;
   state.groups.props.add(group);
-  state.gate = { x, y, z, mesh: group, radius: 5.4, active: false };
+  const label = createWorldLabel("Rift gate", "#72f0ff", 6.2);
+  label.position.set(x, y + 8.25, z);
+  state.gate = { x, y, z, mesh: group, label, radius: 5.4, active: false };
 }
 
 function frame() {
@@ -1182,6 +1361,8 @@ function update(dt) {
   }
   toastTimer = Math.max(0, toastTimer - dt);
   if (toastTimer <= 0) dom.toast.classList.remove("show");
+  clearScreenFlash(dt);
+  state.shake = Math.max(0, state.shake - dt * 1.9);
 
   updateCameraControls(dt);
   updatePlayer(dt);
@@ -1423,6 +1604,7 @@ function syncPlayerObject() {
 
 function updateWorldObjects(dt) {
   const player = state.player;
+  updateWorldLabels(dt);
   for (const chest of state.chests) {
     if (chest.opened) {
       chest.openAmount = Math.min(1, chest.openAmount + dt * 4);
@@ -1453,9 +1635,12 @@ function updateWorldObjects(dt) {
         if (shrineChips > 0) {
           player.coins += shrineChips;
           state.runStats.chipsEarned += shrineChips;
+          spawnFloatingText(`+${shrineChips}`, shrine.x, shrine.y + 4.7, shrine.z, "#f7c948");
         }
         showUpgradeChooser("shrine");
-        showToast(shrineChips > 0 ? `Shrine charged. +${shrineChips} chips.` : "Shrine charged.");
+        playTone("shrine");
+        triggerScreenFlash("reward");
+        showToast(shrineChips > 0 ? `Shrine charged. +${shrineChips} chips.` : "Shrine charged.", "good");
         break;
       }
     } else {
@@ -1481,10 +1666,12 @@ function updateWorldObjects(dt) {
           shop.bought = true;
           shop.mesh.scale.setScalar(0.82);
           state.runStats.shops += 1;
-          showToast(`Pedestal reward bought for ${purchase.cost} chips.`);
+          showToast(`Pedestal reward bought for ${purchase.cost} chips.`, "good");
+          spawnFloatingText(`-${purchase.cost}`, shop.x, shop.y + 3, shop.z, "#ffb38a");
+          playTone("shop");
           showUpgradeChooser("shop");
         } else {
-          showToast(`Need ${purchase.cost} chips for this pedestal.`);
+          showToast(`Need ${purchase.cost} chips for this pedestal.`, "warn");
         }
         return;
       }
@@ -1503,7 +1690,7 @@ function updateWorldObjects(dt) {
 function openChest(chest) {
   const purchase = spendChips(chest.cost);
   if (!purchase.ok) {
-    showToast(`Need ${purchase.cost} chips to open this cache.`);
+    showToast(`Need ${purchase.cost} chips to open this cache.`, "warn");
     return false;
   }
   chest.opened = true;
@@ -1511,9 +1698,75 @@ function openChest(chest) {
   syncChestOpenVisual(chest);
   state.runStats.chests += 1;
   spawnBurst(chest.x, chest.y + 1.4, chest.z, 0xf7c948, 18);
-  showToast(`Cache opened for ${purchase.cost} chips.`);
+  spawnFloatingText(`-${purchase.cost}`, chest.x, chest.y + 2.6, chest.z, "#f7c948");
+  playTone("chest");
+  addCameraShake(0.18);
+  showToast(`Cache opened for ${purchase.cost} chips.`, "good");
   showUpgradeChooser("chest");
   return true;
+}
+
+function updateWorldLabels(dt) {
+  for (const chest of state.chests) {
+    if (!chest.label) continue;
+    chest.label.position.set(chest.x, chest.y + 3.05 + Math.sin(state.runStats.time * 2 + chest.cost) * 0.08, chest.z);
+    const cost = effectiveCost(chest.cost);
+    const distance = distance2d(state.player, chest);
+    const near = distance < 32;
+    chest.label.visible = near || (!chest.opened && distance < 62);
+    if (chest.opened) {
+      updateWorldLabel(chest.label, "Opened", "#7fe7ff");
+      chest.label.material.opacity = 0.48;
+    } else {
+      const discounted = cost < chest.cost;
+      const affordable = state.player.coins >= cost;
+      updateWorldLabel(chest.label, discounted ? `${cost} sale` : `${cost} chips`, affordable ? "#7ff7d4" : "#f7c948");
+      chest.label.material.opacity = near ? 1 : 0.72;
+    }
+  }
+
+  for (const shop of state.shops) {
+    if (!shop.label) continue;
+    shop.label.position.set(shop.x, shop.y + 3.2 + Math.sin(state.runStats.time * 2.2 + shop.cost) * 0.08, shop.z);
+    const cost = effectiveCost(shop.cost);
+    const distance = distance2d(state.player, shop);
+    const near = distance < 34;
+    shop.label.visible = near || (!shop.bought && distance < 64);
+    if (shop.bought) {
+      updateWorldLabel(shop.label, "Sold", "#8fa4af");
+      shop.label.material.opacity = 0.45;
+    } else {
+      const discounted = cost < shop.cost;
+      const affordable = state.player.coins >= cost;
+      updateWorldLabel(shop.label, discounted ? `${cost} sale` : `${cost} chips`, affordable ? "#7ff7d4" : "#ffb38a");
+      shop.label.material.opacity = near ? 1 : 0.72;
+    }
+  }
+
+  for (const shrine of state.shrines) {
+    if (!shrine.label) continue;
+    shrine.label.position.set(shrine.x, shrine.y + 5.25 + Math.sin(state.runStats.time * 2.4) * 0.08, shrine.z);
+    const distance = distance2d(state.player, shrine);
+    const near = distance < 34;
+    shrine.label.visible = near || (!shrine.charged && distance < 64);
+    if (shrine.charged) {
+      updateWorldLabel(shrine.label, "Charged", "#61d394");
+      shrine.label.material.opacity = 0.65;
+    } else if (shrine.charge > 0.02) {
+      updateWorldLabel(shrine.label, `${Math.floor(shrine.charge * 100)}%`, "#7ff7d4");
+      shrine.label.material.opacity = 1;
+    } else {
+      updateWorldLabel(shrine.label, "Shrine", "#7ff7d4");
+      shrine.label.material.opacity = near ? 0.95 : 0.68;
+    }
+  }
+
+  if (state.gate?.label) {
+    const dist = Math.ceil(distance2d(state.gate, state.player));
+    state.gate.label.position.set(state.gate.x, state.gate.y + 8.25 + Math.sin(state.runStats.time * 1.8) * 0.08, state.gate.z);
+    updateWorldLabel(state.gate.label, state.gate.active ? "Boss" : dist < 8 ? "Press E" : `${dist}m`, state.gate.active ? "#ff5e84" : "#72f0ff");
+    state.gate.label.visible = true;
+  }
 }
 
 function syncChestOpenVisual(chest) {
@@ -1551,7 +1804,10 @@ function startFinalSwarm() {
     state.gate.mesh.scale.setScalar(1.18);
   }
   spawnBurst(state.player.x, state.player.y + 1.4, state.player.z, 0xff5e84, 42, 7);
-  showToast("Final swarm. Waves will keep getting worse.");
+  triggerScreenFlash("final");
+  addCameraShake(0.55);
+  playTone("final");
+  showToast("Final swarm. Waves will keep getting worse.", "danger");
 }
 
 function updateDirector(dt) {
@@ -1575,19 +1831,23 @@ function updateDirector(dt) {
   }
 
   if (!finalSwarm && time > 360 && !state.runStats.bossSpawned && Math.floor(time) % 9 === 0) {
-    showToast("The riftstorm is closing. Find the gate.");
+    showToast("The riftstorm is closing. Find the gate.", "warn");
   }
 }
 
 function chooseEnemyType(time, finalSwarm = false, finalTime = 0) {
   const roll = state.rng();
   if (finalSwarm) {
+    if (roll > Math.max(0.74, 0.92 - finalTime / 260)) return "leaper";
+    if (roll < Math.min(0.2, 0.08 + finalTime / 360)) return "bulwark";
     if (roll > Math.max(0.62, 0.86 - finalTime / 220)) return "spiker";
     if (roll < Math.min(0.34, 0.16 + finalTime / 260)) return "crasher";
     if (roll > 0.46) return "bruiser";
     if (roll > 0.24) return "wisp";
     return "splinter";
   }
+  if (time > 165 && roll > 0.91) return "leaper";
+  if (time > 210 && roll < 0.09) return "bulwark";
   if (time > 120 && roll > 0.86) return "spiker";
   if (time > 78 && roll < 0.14) return "crasher";
   if (time > 65 && roll > 0.68) return "bruiser";
@@ -1621,6 +1881,10 @@ function spawnEnemy(typeName, time, atPoint = null) {
     chargeCooldown: type.charge ? 0.8 + state.rng() * 0.9 : 0,
     chargeX: 0,
     chargeZ: 0,
+    leapTimer: 0,
+    leapCooldown: type.leap ? 1.1 + state.rng() * 1.2 : 0,
+    leapX: 0,
+    leapZ: 0,
     elite,
     boss: false,
   };
@@ -1637,6 +1901,8 @@ function makeEnemyMesh(type, enemy) {
   else if (type.geometry === "tetra") geometry = new THREE.TetrahedronGeometry(1.0, 0);
   else if (type.geometry === "wedge") geometry = new THREE.ConeGeometry(1.05, 2.25, 4);
   else if (type.geometry === "diamond") geometry = new THREE.OctahedronGeometry(1.15, 0);
+  else if (type.geometry === "leaper") geometry = new THREE.ConeGeometry(1.05, 2.2, 5);
+  else if (type.geometry === "shield") geometry = new THREE.BoxGeometry(2.3, 1.7, 1.25);
   else geometry = new THREE.ConeGeometry(1.0, 1.9, 6);
 
   const material = new THREE.MeshStandardMaterial({
@@ -1649,6 +1915,29 @@ function makeEnemyMesh(type, enemy) {
   mesh.castShadow = true;
   mesh.scale.setScalar(enemy.radius);
   mesh.position.set(enemy.x, enemy.y + enemy.radius, enemy.z);
+  if (type.geometry === "leaper") mesh.rotation.x = -0.25;
+  if (type.geometry === "shield") {
+    const plate = new THREE.Mesh(
+      new THREE.BoxGeometry(2.5, 2.2, 0.18),
+      new THREE.MeshStandardMaterial({
+        color: 0xd6e3ea,
+        emissive: 0x1b2c36,
+        emissiveIntensity: 0.28,
+        roughness: 0.5,
+      }),
+    );
+    plate.position.z = -0.78;
+    mesh.add(plate);
+  }
+  if (enemy.elite) {
+    const ring = new THREE.Mesh(
+      new THREE.TorusGeometry(1.35, 0.05, 6, 28),
+      new THREE.MeshBasicMaterial({ color: 0xf7c948 }),
+    );
+    ring.rotation.x = Math.PI / 2;
+    ring.position.y = -0.95;
+    mesh.add(ring);
+  }
   return mesh;
 }
 
@@ -1663,7 +1952,9 @@ function spawnBoss() {
   state.meta.unlocks.chain = true;
   saveMeta();
   updateMenuMeta();
-  showToast("Static Lasso unlocked. Riftwarden incoming.");
+  addCameraShake(0.42);
+  playTone("final");
+  showToast("Static Lasso unlocked. Riftwarden incoming.", "danger");
 
   const boss = {
     type: "riftwarden",
@@ -2173,6 +2464,8 @@ function updateEnemies(dt) {
 
     if (enemy.boss) {
       updateBoss(enemy, dt);
+    } else if (enemyTypes[enemy.type]?.leap) {
+      updateLeaperEnemy(enemy, dt);
     } else if (enemyTypes[enemy.type]?.charge) {
       updateChargingEnemy(enemy, dt);
     } else if (enemyTypes[enemy.type]?.shooter) {
@@ -2193,6 +2486,37 @@ function updateEnemies(dt) {
       }
     }
   }
+}
+
+function updateLeaperEnemy(enemy, dt) {
+  const player = state.player;
+  const dx = player.x - enemy.x;
+  const dz = player.z - enemy.z;
+  const len = Math.max(Math.hypot(dx, dz), 0.001);
+  enemy.leapCooldown = Math.max(0, enemy.leapCooldown - dt);
+
+  if (enemy.leapTimer <= 0 && enemy.leapCooldown <= 0 && len < 30) {
+    enemy.leapTimer = 0.46;
+    enemy.leapCooldown = 2.2 + state.rng() * 0.85;
+    enemy.leapX = dx / len;
+    enemy.leapZ = dz / len;
+    spawnBurst(enemy.x, enemy.y + 1.1, enemy.z, enemyTypes[enemy.type].color, 8, 1.8);
+  }
+
+  if (enemy.leapTimer > 0) {
+    enemy.leapTimer -= dt;
+    const arc = Math.sin(Math.max(enemy.leapTimer, 0) * Math.PI / 0.46);
+    enemy.x += enemy.leapX * enemy.speed * 4.4 * dt;
+    enemy.z += enemy.leapZ * enemy.speed * 4.4 * dt;
+    enemy.mesh.scale.setScalar(enemy.radius * (1.08 + arc * 0.22));
+    enemy.mesh.rotation.x = -0.45 - arc * 0.35;
+  } else {
+    enemy.x += (dx / len) * enemy.speed * dt;
+    enemy.z += (dz / len) * enemy.speed * dt;
+    enemy.mesh.scale.setScalar(enemy.radius);
+  }
+
+  syncEnemyMesh(enemy, dt, enemy.leapTimer > 0 ? 5.4 : 2.6);
 }
 
 function updateChargingEnemy(enemy, dt) {
@@ -2270,6 +2594,12 @@ function syncEnemyMesh(enemy, dt, turnSpeed = 1.5) {
   enemy.y = groundHeight(enemy.x, enemy.z);
   enemy.mesh.position.set(enemy.x, enemy.y + enemy.radius + (type.flying ? 1.2 : 0), enemy.z);
   enemy.mesh.rotation.y += dt * (enemy.elite ? turnSpeed + 1 : turnSpeed);
+  if (enemy.mesh.material?.color && enemy.hitTimer <= 0) {
+    const healthRatio = THREE.MathUtils.clamp(enemy.hp / enemy.maxHp, 0, 1);
+    tmpColor.setHex(enemy.elite ? 0xfff06a : type.color);
+    tmpColor2.setHex(0xff5e84);
+    enemy.mesh.material.color.lerpColors(tmpColor2, tmpColor, healthRatio);
+  }
 }
 
 function updateBoss(enemy, dt) {
@@ -2338,22 +2668,34 @@ function damagePlayer(amount) {
   const player = state.player;
   if (player.invuln > 0 || player.dashInvuln > 0) return;
   if (player.evasion > 0 && state.rng() < player.evasion) {
+    state.runStats.dodges += 1;
     player.invuln = 0.25;
     spawnBurst(player.x, player.y + 1.2, player.z, 0xc8f7ff, 8, 1.6);
+    spawnFloatingText("Dodge", player.x, player.y + 2.2, player.z, "#c8f7ff");
+    playTone("dodge");
     return;
   }
   if (player.shieldCharges > 0) {
     player.shieldCharges -= 1;
+    state.runStats.shieldBlocks += 1;
     player.invuln = 0.5;
-    showToast("Barrier absorbed the hit.");
+    showToast("Barrier absorbed the hit.", "good");
     spawnBurst(player.x, player.y + 1.2, player.z, 0x9ff7ff, 12, 2.2);
+    spawnFloatingText("Block", player.x, player.y + 2.2, player.z, "#9ff7ff");
+    addCameraShake(0.08);
+    playTone("shield");
     return;
   }
   const finalGuard = state.runStats?.finalSwarm ? player.finalSwarmGuard : 0;
   const damage = Math.max(1, amount * Math.max(0.55, 1 - finalGuard) - player.armor);
   player.hp -= damage;
+  state.runStats.damageTaken += damage;
   player.invuln = 0.55;
   spawnBurst(player.x, player.y + 1.2, player.z, 0xe95353, 8, 1.8);
+  spawnFloatingText(`-${Math.ceil(damage)}`, player.x, player.y + 2.2, player.z, "#ff8aa5");
+  triggerScreenFlash("hurt");
+  addCameraShake(0.22);
+  playTone("hurt");
 }
 
 function dealDamage(enemy, amount, source) {
@@ -2361,10 +2703,24 @@ function dealDamage(enemy, amount, source) {
   let damage = amount * state.player.damageMult;
   if (enemy.boss) damage *= state.player.bossDamageMult;
   if (state.runStats?.finalSwarm) damage *= 1 + state.player.finalSwarmPower;
-  if (state.rng() < state.player.critChance) damage *= state.player.critMult;
+  const crit = state.rng() < state.player.critChance;
+  if (crit) {
+    damage *= state.player.critMult;
+    state.runStats.crits += 1;
+  }
   if (source === "pulse" && hasSynergy("pulse", "projectile")) damage *= 1.08;
   enemy.hp -= damage;
+  state.runStats.damageDealt += damage;
   enemy.hitTimer = 0.08;
+  const dx = enemy.x - state.player.x;
+  const dz = enemy.z - state.player.z;
+  const len = Math.max(Math.hypot(dx, dz), 0.001);
+  const nudge = crit ? 0.22 : 0.08;
+  enemy.x += (dx / len) * nudge;
+  enemy.z += (dz / len) * nudge;
+  if (crit || damage > 34 || state.rng() < 0.08) {
+    spawnFloatingText(`${crit ? "Crit " : ""}${Math.ceil(damage)}`, enemy.x, enemy.y + enemy.radius * 2 + 0.7, enemy.z, crit ? "#f7c948" : "#f6fbff");
+  }
   if (enemy.mesh.material?.emissive) {
     enemy.mesh.material.emissive.setHex(0xffffff);
     setTimeout(() => {
@@ -2392,10 +2748,14 @@ function killEnemy(enemy) {
   if (enemy.boss) {
     state.runStats.bossDefeated = true;
     spawnBurst(enemy.x, enemy.y + 3, enemy.z, 0xf7c948, 80, 10);
+    spawnFloatingText("+5000", enemy.x, enemy.y + 5, enemy.z, "#f7c948");
+    playTone("victory");
     endRun(true);
   } else if (enemy.elite) {
     state.runStats.elites += 1;
     spawnDrop(enemy.x, enemy.y, enemy.z, 5 + Math.floor(state.runStats.time / 180), "coin");
+    spawnFloatingText("Elite", enemy.x, enemy.y + enemy.radius * 2 + 1, enemy.z, "#f7c948");
+    playTone("elite");
   }
   state.groups.enemies.remove(enemy.mesh);
   enemy.mesh.traverse?.((node) => {
@@ -2452,8 +2812,14 @@ function updateDrops(dt) {
         const chips = Math.max(1, Math.round(drop.value * player.coinMult));
         player.coins += chips;
         state.runStats.chipsEarned += chips;
+        state.runStats.pickups += 1;
+        spawnFloatingText(`+${chips}`, drop.x, drop.y + 0.7, drop.z, "#f7c948");
+        playTone("pickup");
       } else {
+        state.runStats.pickups += 1;
+        if (drop.value >= 7 || state.rng() < 0.08) spawnFloatingText("+xp", drop.x, drop.y + 0.7, drop.z, "#55d6ff");
         addXp(drop.value * player.xpMult);
+        playTone("xp");
       }
       state.groups.drops.remove(drop.mesh);
       drop.mesh.geometry.dispose();
@@ -2469,8 +2835,12 @@ function addXp(amount) {
   if (player.xp >= player.xpNeeded && state.mode === "playing") {
     player.xp -= player.xpNeeded;
     player.level += 1;
+    state.runStats.levelUps += 1;
     player.xpNeeded = Math.floor(30 + player.level ** 1.42 * 13);
     player.hp = Math.min(player.maxHp, player.hp + 12);
+    spawnFloatingText(`Level ${player.level}`, player.x, player.y + 2.7, player.z, "#7fe7ff");
+    triggerScreenFlash("reward");
+    playTone("upgrade");
     showUpgradeChooser("level");
   }
 }
@@ -2499,12 +2869,14 @@ function renderChoiceCard(choice, index) {
   const currentLabel = current > 0 ? roman(current) : "New";
   const nextLabel = roman(next);
   const evolution = weaponEvolutionHint(choice.id, next);
+  const synergy = upgradeSynergyHint(choice);
   return [
     `<small>${index + 1} - ${rarityLabel[choice.rarity]} ${typeLabel(choice.type)}</small>`,
     `<b>${choice.name}</b>`,
     `<div class="choice-level">${currentLabel} to ${nextLabel}</div>`,
     `<span>${choice.description}</span>`,
     evolution ? `<span class="choice-evolution">${evolution}</span>` : "",
+    synergy ? `<span class="choice-synergy">${synergy}</span>` : "",
     `<em>Press ${index + 1} or click to pick</em>`,
   ].join("");
 }
@@ -2518,6 +2890,19 @@ function weaponEvolutionHint(id, nextLevel) {
     skyLance: "Groundfall: landing throws lances outward.",
   };
   return hints[id] || "";
+}
+
+function upgradeSynergyHint(choice) {
+  const player = state.player;
+  const hints = [];
+  if (choice.id === "projectile" && (player.weapons.pulse || player.weapons.prism || player.weapons.skyLance)) hints.push("Boosts your projectile build");
+  if (choice.id === "area" && (player.weapons.mine || player.weapons.comet || player.weapons.driftSaw)) hints.push("Boosts blasts and saws");
+  if (choice.id === "jump" && player.weapons.skyLance) hints.push("Pairs with Sky Lance");
+  if ((choice.id === "speed" || choice.id === "dash") && player.weapons.driftSaw) hints.push("Pairs with Drift Saw");
+  if ((choice.id === "attune" || choice.id === "votive") && state.runStats.shrines > 0) hints.push("Shrine run payoff");
+  if ((choice.id === "market" || choice.id === "greed") && state.runStats.chipsSpent > 0) hints.push("Economy run payoff");
+  if (choice.id === "dawnAnchor" && state.runStats.time > RUN_TIME_LIMIT_SECONDS - 90) hints.push("Final Swarm prep");
+  return hints[0] || "";
 }
 
 function chooseUpgrade(index) {
@@ -2762,7 +3147,9 @@ function applyUpgrade(choice) {
         break;
     }
   }
-  showToast(`${choice.name} ${choice.type === "weapon" ? "upgraded" : "equipped"}.`);
+  playTone("upgrade");
+  triggerScreenFlash("reward");
+  showToast(`${choice.name} ${choice.type === "weapon" ? "upgraded" : "equipped"}.`, "good");
 }
 
 function updateMetaUnlocks() {
@@ -2828,7 +3215,8 @@ function updateMetaUnlocks() {
     state.runStats.unlocks.push(...unlocked);
     saveMeta();
     syncMenuLocks();
-    showToast(`Unlocked: ${unlocked.join(", ")}`);
+    playTone("upgrade");
+    showToast(`Unlocked: ${unlocked.join(", ")}`, "good");
   }
 }
 
@@ -2861,6 +3249,9 @@ function endRun(victory) {
     state.runStats.finalSwarm ? `Final Swarm: ${formatTime(state.runStats.finalSwarmTime)}` : "Final Swarm: not reached",
     `Caches/Shrines/Shops: ${state.runStats.chests}/${state.runStats.shrines}/${state.runStats.shops}`,
     `Chips: ${state.runStats.chipsEarned} earned / ${state.runStats.chipsSpent} spent`,
+    `Damage: ${Math.round(state.runStats.damageDealt)} dealt / ${Math.round(state.runStats.damageTaken)} taken`,
+    `Crits/Dodges/Blocks: ${state.runStats.crits}/${state.runStats.dodges}/${state.runStats.shieldBlocks}`,
+    `Pickups/Level-ups: ${state.runStats.pickups}/${state.runStats.levelUps}`,
     state.runStats.unlocks.length ? `Unlocked: ${state.runStats.unlocks.join(", ")}` : "Unlocked: none this run",
   ].join("<br>");
   dom.result.classList.remove("hidden");
@@ -2889,6 +3280,8 @@ function returnToMenu() {
   state.enemyBullets = [];
   state.projectiles = [];
   state.drops = [];
+  state.labels = [];
+  state.floaters = [];
   state.chests = [];
   state.shrines = [];
   state.shops = [];
@@ -2897,8 +3290,12 @@ function returnToMenu() {
   state.gate = null;
   state.currentChoices = [];
   state.weaponTimers = {};
+  state.flashTimer = 0;
+  state.shake = 0;
   state.runStats = null;
   state.lastObjective = "";
+  if (dom.flash) dom.flash.className = "screen-flash";
+  dom.hud.classList.remove("low-health", "final-swarm");
   dom.hud.classList.add("hidden");
   dom.pause.classList.add("hidden");
   dom.chooser.classList.add("hidden");
@@ -2945,6 +3342,8 @@ function updateHud(force = false) {
   dom.xpText.textContent = `Lv ${player.level}`;
   dom.clock.textContent = runClockText();
   dom.coins.textContent = `${player.coins} chips`;
+  dom.hud.classList.toggle("low-health", hpRatio <= 0.28);
+  dom.hud.classList.toggle("final-swarm", Boolean(state.runStats.finalSwarm));
 
   const objective = currentObjective();
   if (force || objective !== state.lastObjective) {
@@ -2954,9 +3353,13 @@ function updateHud(force = false) {
 
   if (force || Math.floor(state.runStats.time * 4) % 4 === 0) {
     const entries = Object.entries(player.upgrades)
-      .sort((a, b) => a[0].localeCompare(b[0]))
+      .sort((a, b) => {
+        const weaponDelta = Number(Boolean(player.weapons[b[0]])) - Number(Boolean(player.weapons[a[0]]));
+        if (weaponDelta) return weaponDelta;
+        return b[1] - a[1] || a[0].localeCompare(b[0]);
+      })
       .map(([id, level]) => `<div class="build-chip">${upgradeById[id]?.name || id} ${roman(level)}</div>`);
-    dom.buildList.innerHTML = entries.slice(0, 12).join("");
+    dom.buildList.innerHTML = entries.length ? entries.slice(0, 14).join("") : `<div class="build-chip">No upgrades yet</div>`;
   }
 }
 
@@ -2977,7 +3380,8 @@ function currentObjective() {
   const chest = state.chests.find((candidate) => !candidate.opened && distance2d(candidate, state.player) < candidate.radius + 0.8);
   if (chest) {
     const cost = effectiveCost(chest.cost);
-    return state.player.coins >= cost ? `Press E to open cache (${cost})` : `Need ${cost} chips for cache`;
+    const sale = cost < chest.cost ? " sale" : "";
+    return state.player.coins >= cost ? `Press E to open cache (${cost}${sale})` : `Need ${cost} chips for cache${sale}`;
   }
   const shrine = state.shrines.find(
     (candidate) => !candidate.charged && distance2d(candidate, state.player) < candidate.radius + 0.6,
@@ -2986,7 +3390,8 @@ function currentObjective() {
   const shop = state.shops.find((candidate) => !candidate.bought && distance2d(candidate, state.player) < candidate.radius + 0.8);
   if (shop) {
     const cost = effectiveCost(shop.cost);
-    return state.player.coins >= cost ? `Press E to buy reward (${cost})` : `Need ${cost} chips`;
+    const sale = cost < shop.cost ? " sale" : "";
+    return state.player.coins >= cost ? `Press E to buy reward (${cost}${sale})` : `Need ${cost} chips${sale}`;
   }
   if (state.gate && state.player) {
     const dist = Math.ceil(distance2d(state.gate, state.player));
@@ -3015,6 +3420,11 @@ function render() {
       player.z + Math.cos(cameraRig.yaw) * horizontal,
     );
     camera.position.lerp(desired, 0.08);
+    if (state.shake > 0) {
+      camera.position.x += (state.rng() - 0.5) * state.shake * 1.8;
+      camera.position.y += (state.rng() - 0.5) * state.shake * 1.1;
+      camera.position.z += (state.rng() - 0.5) * state.shake * 1.8;
+    }
     camera.lookAt(target);
   } else {
     camera.position.set(-32, 44, 58);
@@ -3123,6 +3533,17 @@ function spawnBurst(x, y, z, color, count = 10, spread = 3) {
   }
 }
 
+function spawnFloatingText(text, x, y, z, color = "#f6fbff") {
+  const sprite = createWorldLabel(text, color, 3.8);
+  sprite.position.set(x, y, z);
+  sprite.material.opacity = 0.95;
+  state.floaters.push({
+    sprite,
+    ttl: 0.82,
+    ySpeed: 1.9,
+  });
+}
+
 function updateEffects(dt) {
   for (let i = state.effects.length - 1; i >= 0; i -= 1) {
     const effect = state.effects[i];
@@ -3140,6 +3561,21 @@ function updateEffects(dt) {
       effect.mesh.geometry?.dispose?.();
       effect.mesh.material?.dispose?.();
       state.effects.splice(i, 1);
+    }
+  }
+
+  for (let i = state.floaters.length - 1; i >= 0; i -= 1) {
+    const floater = state.floaters[i];
+    floater.ttl -= dt;
+    floater.sprite.position.y += floater.ySpeed * dt;
+    floater.sprite.material.opacity = THREE.MathUtils.clamp(floater.ttl / 0.82, 0, 1);
+    if (floater.ttl <= 0) {
+      state.groups.labels.remove(floater.sprite);
+      floater.sprite.material.map?.dispose?.();
+      floater.sprite.material.dispose?.();
+      const labelIndex = state.labels.indexOf(floater.sprite);
+      if (labelIndex >= 0) state.labels.splice(labelIndex, 1);
+      state.floaters.splice(i, 1);
     }
   }
 }
@@ -3197,10 +3633,72 @@ function typeLabel(type) {
   return "Item";
 }
 
-function showToast(message) {
+function showToast(message, tone = "") {
   dom.toast.textContent = message;
+  dom.toast.classList.remove("good", "warn", "danger");
+  if (tone) dom.toast.classList.add(tone);
   dom.toast.classList.add("show");
   toastTimer = 2.5;
+}
+
+function triggerScreenFlash(kind = "reward") {
+  if (!dom.flash) return;
+  dom.flash.className = `screen-flash ${kind}`;
+  state.flashTimer = 0.16;
+  window.setTimeout(() => {
+    if (dom.flash?.className === `screen-flash ${kind}`) dom.flash.className = "screen-flash";
+  }, 180);
+}
+
+function clearScreenFlash(dt) {
+  if (!dom.flash || state.flashTimer <= 0) return;
+  state.flashTimer -= dt;
+  if (state.flashTimer <= 0) dom.flash.className = "screen-flash";
+}
+
+function addCameraShake(amount) {
+  state.shake = Math.min(1.1, Math.max(state.shake, amount));
+}
+
+function ensureAudio() {
+  if (state.audio.ctx) return;
+  const AudioContext = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContext) return;
+  state.audio.ctx = new AudioContext();
+  state.audio.enabled = true;
+}
+
+function playTone(kind) {
+  const ctx = state.audio.ctx;
+  if (!ctx || !state.audio.enabled) return;
+  if (ctx.state === "suspended") ctx.resume?.();
+  const presets = {
+    start: [220, 0.06, 0.03],
+    pickup: [740, 0.035, 0.018],
+    xp: [520, 0.025, 0.012],
+    chest: [330, 0.12, 0.045],
+    shop: [440, 0.08, 0.035],
+    shrine: [660, 0.16, 0.04],
+    upgrade: [880, 0.11, 0.04],
+    hurt: [120, 0.12, 0.05],
+    dodge: [980, 0.05, 0.025],
+    shield: [560, 0.08, 0.03],
+    elite: [180, 0.16, 0.05],
+    final: [96, 0.28, 0.06],
+    victory: [990, 0.22, 0.06],
+  };
+  const [frequency, duration, volume] = presets[kind] || presets.pickup;
+  const oscillator = ctx.createOscillator();
+  const gain = ctx.createGain();
+  oscillator.type = kind === "hurt" || kind === "final" ? "sawtooth" : "triangle";
+  oscillator.frequency.setValueAtTime(frequency, ctx.currentTime);
+  oscillator.frequency.exponentialRampToValueAtTime(Math.max(40, frequency * 0.62), ctx.currentTime + duration);
+  gain.gain.setValueAtTime(volume, ctx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
+  oscillator.connect(gain);
+  gain.connect(ctx.destination);
+  oscillator.start();
+  oscillator.stop(ctx.currentTime + duration);
 }
 
 function syncMenuLocks() {
@@ -3489,6 +3987,13 @@ function renderGameToText() {
           shrines: state.runStats.shrines,
           chests: state.runStats.chests,
           shops: state.runStats.shops,
+          pickups: state.runStats.pickups,
+          damageDealt: Math.round(state.runStats.damageDealt),
+          damageTaken: Math.round(state.runStats.damageTaken),
+          crits: state.runStats.crits,
+          dodges: state.runStats.dodges,
+          shieldBlocks: state.runStats.shieldBlocks,
+          levelUps: state.runStats.levelUps,
           evolutions: state.runStats.evolutions,
         }
       : null,
@@ -3538,6 +4043,15 @@ function renderGameToText() {
       rarity: choice.rarity,
       offerWeight: Number((choice.offerWeight || 1).toFixed(2)),
     })),
+    labels: {
+      visible: state.labels.filter((label) => label.visible).length,
+      total: state.labels.length,
+      floaters: state.floaters.length,
+    },
+    sprint50: {
+      completed: SPRINT_50_COMPLETED.length,
+      items: SPRINT_50_COMPLETED,
+    },
     meta: state.meta,
   };
   return JSON.stringify(payload);
@@ -3563,6 +4077,12 @@ window.__riftbound = {
     grantCoins(amount) {
       if (state.player) state.player.coins += amount;
     },
+    grantUpgrade(id, rarity = "common") {
+      const upgrade = upgradeById[id];
+      if (!upgrade || state.mode !== "playing") return false;
+      applyUpgrade({ ...upgrade, rarity, description: describeUpgrade(upgrade, rarity) });
+      return true;
+    },
     groundHeight(x, z) {
       return groundHeight(x, z);
     },
@@ -3581,6 +4101,20 @@ window.__riftbound = {
       if (state.mode !== "playing" || !state.player) return false;
       spawnEnemy(type, state.runStats?.time || 0, { x, z });
       return true;
+    },
+    spawnWave(types = ["skitter", "bruiser", "leaper", "bulwark"]) {
+      if (state.mode !== "playing" || !state.player) return 0;
+      types.forEach((type, index) => {
+        const angle = (index / types.length) * Math.PI * 2;
+        spawnEnemy(type, state.runStats?.time || 0, {
+          x: state.player.x + Math.cos(angle) * 14,
+          z: state.player.z + Math.sin(angle) * 14,
+        });
+      });
+      return types.length;
+    },
+    sprint50() {
+      return [...SPRINT_50_COMPLETED];
     },
     teleportTo(kind) {
       if (!state.player) return false;
